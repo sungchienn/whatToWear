@@ -13,10 +13,10 @@
       <section class="login-panel">
         <div class="brand-mark">WTW</div>
         <h1>今天穿什么</h1>
-        <p>记录竞猜、动态赔率和奶茶积分。</p>
+        <p>多维竞猜、实时赔率、奶茶积分。</p>
         <div class="segmented" role="tablist">
-          <button class="segment active" data-auth-mode="login">登录</button>
-          <button class="segment" data-auth-mode="register">注册</button>
+          <button class="segment active" data-auth-mode="login" type="button">登录</button>
+          <button class="segment" data-auth-mode="register" type="button">注册</button>
         </div>
         <form id="authForm" class="form-grid">
           <label>
@@ -49,10 +49,11 @@
       </header>
 
       <nav class="tabs">
-        <button class="tab active" data-tab="today">竞猜</button>
-        <button class="tab" data-tab="odds">赔率</button>
-        <button class="tab" data-tab="record">记录</button>
-        <button class="tab" data-tab="rank">积分</button>
+        <button class="tab active" data-tab="today" type="button">竞猜</button>
+        <button class="tab" data-tab="odds" type="button">赔率</button>
+        <button class="tab" data-tab="record" type="button">记录</button>
+        <button class="tab" data-tab="rank" type="button">积分</button>
+        <button class="tab admin-only hidden" data-tab="admin" type="button">管理</button>
       </nav>
 
       <section class="status-grid">
@@ -71,28 +72,41 @@
       </section>
 
       <section class="tab-panel" data-panel="today">
-        <div class="layout two-col">
+        <div class="layout two-col preview-layout">
           <article class="tool-panel">
             <div class="section-title">
               <h2>提交竞猜</h2>
               <span id="userBadge"></span>
             </div>
-            <form id="guessForm" class="form-grid">
-              <label>
-                颜色
-                <select id="guessColor"></select>
-              </label>
-              <label>
-                款式
-                <select id="guessStyle"></select>
-              </label>
+            <form id="guessForm">
+              <div id="guessFields" class="field-grid"></div>
               <div class="odds-preview">
                 <span>当前赔率</span>
                 <strong id="guessOdds">--</strong>
-                <small id="guessProb">--</small>
+                <small id="guessProb">至少选一个维度</small>
+                <small id="poolInfo"></small>
               </div>
-              <button class="primary-action" type="submit">提交或更新</button>
+              <button class="primary-action full-width" type="submit">提交或更新</button>
             </form>
+          </article>
+
+          <article class="tool-panel preview-panel">
+            <div class="section-title">
+              <h2>效果图</h2>
+              <span>抽象但够用</span>
+            </div>
+            <div class="avatar-stage" aria-label="着装效果图">
+              <div class="avatar">
+                <div id="avatarHair" class="avatar-hair"></div>
+                <div class="avatar-head"></div>
+                <div id="avatarOuter" class="avatar-outer"></div>
+                <div id="avatarUpper" class="avatar-upper"><span id="upperLabel">上身</span></div>
+                <div id="avatarLower" class="avatar-lower"><span id="lowerLabel">下身</span></div>
+                <div id="avatarLegwear" class="avatar-legwear"></div>
+                <div id="avatarShoes" class="avatar-shoes"></div>
+              </div>
+              <div id="previewCaption" class="preview-caption">选择维度后会实时变化</div>
+            </div>
           </article>
 
           <article class="tool-panel">
@@ -109,19 +123,18 @@
         <div class="layout">
           <article class="tool-panel">
             <div class="section-title">
-              <h2>推荐赔率</h2>
-              <button id="regenOddsBtn" class="secondary-action admin-only">重算</button>
+              <h2>赔率参考</h2>
+              <span id="modelVersion"></span>
             </div>
+            <p id="modelSummary" class="muted"></p>
             <div id="topOdds" class="odds-grid"></div>
           </article>
           <article class="tool-panel">
             <div class="section-title">
-              <h2>模型参考</h2>
-              <span id="modelVersion"></span>
+              <h2>历史分布</h2>
+              <span id="historyCount">0 条</span>
             </div>
-            <p id="modelSummary" class="muted"></p>
-            <div class="bars" id="colorBars"></div>
-            <div class="bars" id="styleBars"></div>
+            <div class="bars" id="dimensionBars"></div>
           </article>
         </div>
       </section>
@@ -131,36 +144,27 @@
           <article class="tool-panel admin-only">
             <div class="section-title">
               <h2>实际着装</h2>
-              <button id="settleBtn" class="secondary-action">结算</button>
+              <button id="settleBtn" class="secondary-action" type="button">结算</button>
             </div>
-            <form id="outfitForm" class="form-grid">
-              <label>
-                颜色
-                <select id="actualColor"></select>
-              </label>
-              <label>
-                款式
-                <select id="actualStyle"></select>
-              </label>
-              <label>
-                风格
-                <select id="actualVibe"></select>
-              </label>
-              <label>
-                标签
-                <input id="actualTags" placeholder="如：外套、深色、会议日" maxlength="120" />
-              </label>
-              <label class="wide">
-                备注
-                <textarea id="actualNotes" maxlength="300"></textarea>
-              </label>
-              <button class="primary-action" type="submit">保存记录</button>
+            <form id="outfitForm">
+              <div id="actualFields" class="field-grid actual-grid"></div>
+              <div class="form-grid notes-grid">
+                <label>
+                  标签
+                  <input id="actualTags" placeholder="如：会议日、加班、雨天" maxlength="120" />
+                </label>
+                <label>
+                  备注
+                  <textarea id="actualNotes" maxlength="300"></textarea>
+                </label>
+              </div>
+              <button class="primary-action full-width" type="submit">保存记录</button>
             </form>
           </article>
           <article class="tool-panel">
             <div class="section-title">
               <h2>历史着装</h2>
-              <span id="historyCount">0 条</span>
+              <span id="historyCount2">0 条</span>
             </div>
             <div id="historyList" class="list"></div>
           </article>
@@ -181,6 +185,37 @@
               <h2>结算记录</h2>
             </div>
             <div id="settlementList" class="list compact-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" data-panel="admin">
+        <div class="layout two-col admin-layout">
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>竞猜维度</h2>
+              <button id="addDimensionBtn" class="secondary-action" type="button">新增维度</button>
+            </div>
+            <form id="dimensionForm">
+              <div id="dimensionEditor" class="dimension-editor"></div>
+              <button class="primary-action full-width" type="submit">保存维度配置</button>
+            </form>
+          </article>
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>系统设置</h2>
+            </div>
+            <form id="settingsForm" class="form-grid">
+              <label>
+                每日截止时间
+                <input id="deadlineInput" type="time" />
+              </label>
+              <button class="primary-action" type="submit">保存设置</button>
+            </form>
+            <div class="admin-note">
+              <strong>赔率逻辑</strong>
+              <p>只计算你勾选的维度。比如只猜“上身黑色”，池子就是上身颜色；猜“黑色 + T恤 + 白鞋”，池子就是三个维度的组合。历史命中率越高，赔率越低。</p>
+            </div>
           </article>
         </div>
       </section>

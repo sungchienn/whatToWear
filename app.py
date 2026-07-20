@@ -4,7 +4,9 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import math
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -22,11 +24,89 @@ PORT = int(os.environ.get("PORT", "8008"))
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-change-this-secret")
 USER_INVITE_CODE = os.environ.get("USER_INVITE_CODE", "wear2026")
 ADMIN_INVITE_CODE = os.environ.get("ADMIN_INVITE_CODE", "admin2026")
-MODEL_VERSION = "decay-markov-v1"
+MODEL_VERSION = "field-pool-bayes-v2"
+ODDS_CAP = 50.0
 
-COLORS = ["黑色", "白色", "灰色", "蓝色", "绿色", "红色", "粉色", "黄色", "卡其", "紫色", "其他"]
-STYLES = ["T恤", "衬衫", "卫衣", "针织衫", "外套", "连衣裙", "西装", "运动装", "牛仔", "裙装", "其他"]
-VIBES = ["休闲", "通勤", "运动", "正式", "甜酷", "简约", "保暖", "其他"]
+
+DEFAULT_DIMENSIONS = [
+    {
+        "key": "hair_style",
+        "name": "发型",
+        "active": True,
+        "visual_part": "hair",
+        "options": ["短发", "长发", "马尾", "卷发", "丸子头", "帽子压住看不清", "今天头发很有想法"],
+    },
+    {
+        "key": "upper_color",
+        "name": "上身颜色",
+        "active": True,
+        "visual_part": "upper_color",
+        "options": ["黑色", "白色", "灰色", "蓝色", "绿色", "红色", "粉色", "黄色", "卡其", "紫色", "其他", "不穿"],
+    },
+    {
+        "key": "top_style",
+        "name": "上身款式",
+        "active": True,
+        "visual_part": "top_style",
+        "options": ["T恤", "衬衫", "卫衣", "针织衫", "西装", "马甲", "背心", "不穿上衣", "披了个谜"],
+    },
+    {
+        "key": "outerwear",
+        "name": "是否有外套",
+        "active": True,
+        "visual_part": "outerwear",
+        "options": ["无外套", "有外套", "抱在手上", "披着但不承认"],
+    },
+    {
+        "key": "outerwear_color",
+        "name": "外套颜色",
+        "active": True,
+        "visual_part": "outerwear_color",
+        "options": ["黑色", "白色", "灰色", "蓝色", "绿色", "红色", "卡其", "透明外套", "其他"],
+    },
+    {
+        "key": "lower_color",
+        "name": "下身颜色",
+        "active": True,
+        "visual_part": "lower_color",
+        "options": ["黑色", "白色", "灰色", "蓝色", "卡其", "棕色", "粉色", "其他", "下装失踪"],
+    },
+    {
+        "key": "lower_style",
+        "name": "下身款式",
+        "active": True,
+        "visual_part": "lower_style",
+        "options": ["长裤", "牛仔裤", "运动裤", "短裤", "半身裙", "连衣裙", "下装失踪风", "不穿"],
+    },
+    {
+        "key": "legwear",
+        "name": "袜类/腿部",
+        "active": True,
+        "visual_part": "legwear",
+        "options": ["无明显袜类", "短袜", "长袜", "丝袜", "看不出来", "袜子很抢戏"],
+    },
+    {
+        "key": "shoes_color",
+        "name": "鞋子颜色",
+        "active": True,
+        "visual_part": "shoes_color",
+        "options": ["黑色", "白色", "灰色", "棕色", "蓝色", "红色", "其他", "拖鞋气质"],
+    },
+    {
+        "key": "shoes_style",
+        "name": "鞋子款式",
+        "active": True,
+        "visual_part": "shoes_style",
+        "options": ["运动鞋", "皮鞋", "靴子", "帆布鞋", "凉鞋", "拖鞋", "看不清"],
+    },
+    {
+        "key": "vibe",
+        "name": "整体风格",
+        "active": True,
+        "visual_part": "vibe",
+        "options": ["休闲", "通勤", "运动", "正式", "甜酷", "简约", "保暖", "今天是随机皮肤"],
+    },
+]
 
 
 def now_ts():
@@ -54,6 +134,11 @@ def db():
 
 def row_to_dict(row):
     return dict(row) if row else None
+
+
+def column_exists(conn, table, column):
+    rows = conn.execute("PRAGMA table_info(%s)" % table).fetchall()
+    return any(row["name"] == column for row in rows)
 
 
 def init_db():
@@ -102,18 +187,6 @@ def init_db():
                 UNIQUE(date, user_id)
             );
 
-            CREATE TABLE IF NOT EXISTS predictions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                color TEXT NOT NULL,
-                style TEXT NOT NULL,
-                probability REAL NOT NULL,
-                odds_weight REAL NOT NULL,
-                model_version TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                UNIQUE(date, color, style, model_version)
-            );
-
             CREATE TABLE IF NOT EXISTS settlements (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
@@ -131,9 +204,14 @@ def init_db():
             );
             """
         )
+        if not column_exists(conn, "guesses", "fields_json"):
+            conn.execute("ALTER TABLE guesses ADD COLUMN fields_json TEXT DEFAULT '{}'")
+        if not column_exists(conn, "outfit_records", "fields_json"):
+            conn.execute("ALTER TABLE outfit_records ADD COLUMN fields_json TEXT DEFAULT '{}'")
+        conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", ("guess_deadline", "10:00"))
         conn.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
-            ("guess_deadline", "10:00"),
+            ("dimensions", json.dumps(DEFAULT_DIMENSIONS, ensure_ascii=False)),
         )
 
 
@@ -170,6 +248,184 @@ def set_setting(conn, key, value):
         "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
+
+
+def get_dimensions(conn):
+    raw = get_setting(conn, "dimensions")
+    try:
+        dims = json.loads(raw) if raw else DEFAULT_DIMENSIONS
+    except json.JSONDecodeError:
+        dims = DEFAULT_DIMENSIONS
+    return validate_dimensions(dims, forgiving=True)
+
+
+def validate_dimensions(raw_dims, forgiving=False):
+    if not isinstance(raw_dims, list):
+        if forgiving:
+            return DEFAULT_DIMENSIONS
+        raise ValueError("维度配置必须是数组。")
+
+    seen = set()
+    dims = []
+    for index, raw in enumerate(raw_dims):
+        if not isinstance(raw, dict):
+            continue
+        key = re.sub(r"[^a-zA-Z0-9_]", "_", str(raw.get("key") or "").strip())[:40]
+        name = str(raw.get("name") or key).strip()[:30]
+        if not key or key in seen or not name:
+            continue
+        options = raw.get("options") or []
+        if isinstance(options, str):
+            options = [part.strip() for part in options.splitlines()]
+        clean_options = []
+        for option in options:
+            option = str(option).strip()[:30]
+            if option and option not in clean_options:
+                clean_options.append(option)
+        if len(clean_options) < 2:
+            continue
+        seen.add(key)
+        dims.append(
+            {
+                "key": key,
+                "name": name,
+                "active": bool(raw.get("active", True)),
+                "visual_part": str(raw.get("visual_part") or key).strip()[:40],
+                "options": clean_options[:40],
+                "order": int(raw.get("order", index)),
+            }
+        )
+    dims.sort(key=lambda item: item.get("order", 0))
+    if not dims:
+        if forgiving:
+            return DEFAULT_DIMENSIONS
+        raise ValueError("至少保留一个包含两个以上选项的维度。")
+    return dims[:30]
+
+
+def active_dimensions(dimensions):
+    return [dim for dim in dimensions if dim.get("active")]
+
+
+def dimension_map(dimensions):
+    return {dim["key"]: dim for dim in dimensions}
+
+
+def normalize_fields(raw_fields, dimensions, allow_empty=False):
+    raw_fields = raw_fields or {}
+    if not isinstance(raw_fields, dict):
+        raise ValueError("竞猜字段格式不正确。")
+    dims = dimension_map(dimensions)
+    fields = {}
+    for key, value in raw_fields.items():
+        if key not in dims:
+            continue
+        value = str(value).strip()
+        if value in dims[key]["options"]:
+            fields[key] = value
+    if not fields and not allow_empty:
+        raise ValueError("至少选择一个可竞猜维度。")
+    return fields
+
+
+def legacy_fields(row):
+    fields = {}
+    if row is None:
+        return fields
+    try:
+        fields = json.loads(row["fields_json"] or "{}")
+    except (KeyError, TypeError, json.JSONDecodeError):
+        fields = {}
+    if not isinstance(fields, dict):
+        fields = {}
+    if not fields:
+        color = row["color"] if "color" in row.keys() else ""
+        style = row["style"] if "style" in row.keys() else ""
+        vibe = row["vibe"] if "vibe" in row.keys() else ""
+        if color:
+            fields["upper_color"] = color
+        if style:
+            fields["top_style"] = style
+        if vibe:
+            fields["vibe"] = vibe
+    return fields
+
+
+def format_fields(fields, dimensions):
+    dims = dimension_map(dimensions)
+    labels = []
+    for dim in dimensions:
+        key = dim["key"]
+        if key in fields:
+            labels.append({"key": key, "name": dim["name"], "value": fields[key]})
+    for key, value in fields.items():
+        if key not in dims:
+            labels.append({"key": key, "name": key, "value": value})
+    return labels
+
+
+def selected_pool_size(fields, dimensions):
+    dims = dimension_map(dimensions)
+    size = 1
+    for key in fields:
+        if key in dims:
+            size *= max(1, len(dims[key]["options"]))
+    return max(1, size)
+
+
+def odds_for_fields(conn, date_text, fields, dimensions):
+    fields = normalize_fields(fields, dimensions)
+    pool_size = selected_pool_size(fields, dimensions)
+    target_date = parse_date(date_text)
+    rows = conn.execute(
+        "SELECT * FROM outfit_records WHERE date < ? ORDER BY date ASC",
+        (date_text,),
+    ).fetchall()
+
+    total_weight = 0.0
+    match_weight = 0.0
+    for row in rows:
+        record_fields = legacy_fields(row)
+        days = max(0, (target_date - parse_date(row["date"])).days)
+        weight = 0.93 ** days
+        total_weight += weight
+        if all(record_fields.get(key) == value for key, value in fields.items()):
+            match_weight += weight
+
+    prior_probability = 1.0 / pool_size
+    prior_strength = 1.0
+    probability = (match_weight + prior_strength * prior_probability) / (total_weight + prior_strength)
+    probability = max(0.001, min(0.98, probability))
+    odds_weight = min(ODDS_CAP, max(1.05, 1.0 / probability))
+    return {
+        "probability": round(probability, 5),
+        "odds_weight": round(odds_weight, 2),
+        "pool_size": pool_size,
+        "sample_weight": round(total_weight, 2),
+        "match_weight": round(match_weight, 2),
+        "model_version": MODEL_VERSION,
+    }
+
+
+def build_recommendations(conn, date_text, dimensions):
+    recommendations = []
+    for dim in active_dimensions(dimensions):
+        for option in dim["options"]:
+            fields = {dim["key"]: option}
+            odds = odds_for_fields(conn, date_text, fields, dimensions)
+            recommendations.append({"fields": fields, "labels": format_fields(fields, dimensions), **odds})
+
+    common_keys = [key for key in ["upper_color", "top_style", "outerwear", "lower_style", "shoes_color"] if key in dimension_map(dimensions)]
+    if len(common_keys) >= 2:
+        first, second = common_keys[0], common_keys[1]
+        dims = dimension_map(dimensions)
+        for left in dims[first]["options"][:12]:
+            for right in dims[second]["options"][:12]:
+                fields = {first: left, second: right}
+                odds = odds_for_fields(conn, date_text, fields, dimensions)
+                recommendations.append({"fields": fields, "labels": format_fields(fields, dimensions), **odds})
+    recommendations.sort(key=lambda item: item["probability"], reverse=True)
+    return recommendations[:18]
 
 
 def get_current_user(handler):
@@ -209,134 +465,6 @@ def is_locked(conn, date_text):
         return False
 
 
-def decayed_counts(records, field, options, target_date, alpha=0.9, decay=0.93):
-    counts = {option: alpha for option in options}
-    for record in records:
-        days = max(0, (target_date - parse_date(record["date"])).days)
-        value = record[field] if record[field] in counts else "其他"
-        counts[value] = counts.get(value, alpha) + decay ** days
-    total = sum(counts.values()) or 1
-    return {key: value / total for key, value in counts.items()}
-
-
-def transition_probs(records, field, options, previous_value, alpha=0.7):
-    counts = {option: alpha for option in options}
-    ordered = sorted(records, key=lambda row: row["date"])
-    for before, after in zip(ordered, ordered[1:]):
-        before_value = before[field] if before[field] in counts else "其他"
-        after_value = after[field] if after[field] in counts else "其他"
-        if before_value == previous_value:
-            counts[after_value] = counts.get(after_value, alpha) + 1
-    total = sum(counts.values()) or 1
-    return {key: value / total for key, value in counts.items()}
-
-
-def blend_probs(marginal, transition=None):
-    if not transition:
-        return marginal
-    return {
-        key: (0.65 * marginal.get(key, 0)) + (0.35 * transition.get(key, 0))
-        for key in marginal
-    }
-
-
-def generate_predictions(conn, date_text):
-    target_date = parse_date(date_text)
-    rows = conn.execute(
-        "SELECT * FROM outfit_records WHERE date < ? ORDER BY date ASC",
-        (date_text,),
-    ).fetchall()
-    records = [dict(row) for row in rows]
-    previous = conn.execute(
-        "SELECT * FROM outfit_records WHERE date < ? ORDER BY date DESC LIMIT 1",
-        (date_text,),
-    ).fetchone()
-
-    color_marginal = decayed_counts(records, "color", COLORS, target_date)
-    style_marginal = decayed_counts(records, "style", STYLES, target_date)
-
-    color_transition = None
-    style_transition = None
-    if previous:
-        color_transition = transition_probs(records, "color", COLORS, previous["color"])
-        style_transition = transition_probs(records, "style", STYLES, previous["style"])
-
-    color_probs = blend_probs(color_marginal, color_transition)
-    style_probs = blend_probs(style_marginal, style_transition)
-
-    combo_bias = {}
-    for record in records:
-        days = max(0, (target_date - parse_date(record["date"])).days)
-        key = (record["color"], record["style"])
-        combo_bias[key] = combo_bias.get(key, 0.0) + 0.93 ** days
-    max_bias = max(combo_bias.values()) if combo_bias else 0
-
-    scored = []
-    for color in COLORS:
-        for style in STYLES:
-            raw = color_probs[color] * style_probs[style]
-            bias = combo_bias.get((color, style), 0.0)
-            combo_factor = 0.85 + (0.35 * (bias / max_bias if max_bias else 0))
-            scored.append((color, style, raw * combo_factor))
-
-    total = sum(item[2] for item in scored) or 1
-    predictions = []
-    for color, style, score in scored:
-        probability = score / total
-        odds_weight = min(max(1 / probability, 1.1), 20.0)
-        predictions.append(
-            {
-                "date": date_text,
-                "color": color,
-                "style": style,
-                "probability": round(probability, 5),
-                "odds_weight": round(odds_weight, 2),
-                "model_version": MODEL_VERSION,
-            }
-        )
-
-    conn.execute(
-        "DELETE FROM predictions WHERE date = ? AND model_version = ?",
-        (date_text, MODEL_VERSION),
-    )
-    conn.executemany(
-        """
-        INSERT INTO predictions(date, color, style, probability, odds_weight, model_version, created_at)
-        VALUES(:date, :color, :style, :probability, :odds_weight, :model_version, :created_at)
-        """,
-        [dict(item, created_at=now_ts()) for item in predictions],
-    )
-    return predictions
-
-
-def ensure_predictions(conn, date_text):
-    rows = conn.execute(
-        """
-        SELECT * FROM predictions
-        WHERE date = ? AND model_version = ?
-        ORDER BY probability DESC
-        """,
-        (date_text, MODEL_VERSION),
-    ).fetchall()
-    if rows:
-        return [dict(row) for row in rows]
-    return sorted(generate_predictions(conn, date_text), key=lambda item: item["probability"], reverse=True)
-
-
-def find_prediction(conn, date_text, color, style):
-    ensure_predictions(conn, date_text)
-    row = conn.execute(
-        """
-        SELECT probability, odds_weight FROM predictions
-        WHERE date = ? AND color = ? AND style = ? AND model_version = ?
-        """,
-        (date_text, color, style, MODEL_VERSION),
-    ).fetchone()
-    if row:
-        return float(row["probability"]), float(row["odds_weight"])
-    return 0.01, 20.0
-
-
 def current_balance(conn, user_id):
     row = conn.execute(
         "SELECT balance_after FROM settlements WHERE user_id = ? ORDER BY id DESC LIMIT 1",
@@ -345,13 +473,20 @@ def current_balance(conn, user_id):
     return float(row["balance_after"]) if row else 0.0
 
 
-def settle_date(conn, date_text):
+def guess_matches_actual(guess_fields, actual_fields):
+    if not guess_fields:
+        return False
+    return all(actual_fields.get(key) == value for key, value in guess_fields.items())
+
+
+def settle_date(conn, date_text, dimensions):
     outfit = conn.execute("SELECT * FROM outfit_records WHERE date = ?", (date_text,)).fetchone()
     if not outfit:
         raise ValueError("请先记录当天实际着装。")
     if conn.execute("SELECT 1 FROM settlements WHERE date = ?", (date_text,)).fetchone():
         raise ValueError("这一天已经结算过。")
 
+    actual_fields = legacy_fields(outfit)
     guesses = conn.execute(
         """
         SELECT guesses.*, users.name FROM guesses
@@ -363,11 +498,15 @@ def settle_date(conn, date_text):
     if not guesses:
         raise ValueError("这一天还没有人提交竞猜。")
 
-    winners = [
-        dict(row) for row in guesses
-        if row["color"] == outfit["color"] and row["style"] == outfit["style"]
-    ]
-    losers = [dict(row) for row in guesses if dict(row) not in winners]
+    winners = []
+    losers = []
+    for row in guesses:
+        item = dict(row)
+        item["fields"] = legacy_fields(row)
+        if guess_matches_actual(item["fields"], actual_fields):
+            winners.append(item)
+        else:
+            losers.append(item)
 
     entries = []
     if not winners or not losers:
@@ -382,8 +521,7 @@ def settle_date(conn, date_text):
             before = current_balance(conn, loser["user_id"])
             entries.append((date_text, loser["user_id"], "miss", -1.0, before - 1.0, now_ts()))
         for winner in winners:
-            reward = pool * max(winner["odds_weight"], 0.01) / total_weight
-            reward = round(reward, 2)
+            reward = round(pool * max(winner["odds_weight"], 0.01) / total_weight, 2)
             before = current_balance(conn, winner["user_id"])
             entries.append((date_text, winner["user_id"], "hit", reward, before + reward, now_ts()))
 
@@ -432,7 +570,7 @@ def static_response(handler, path, content_type):
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "WhatToWear/1.0"
+    server_version = "WhatToWear/2.0"
 
     def log_message(self, fmt, *args):
         print("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), fmt % args))
@@ -488,6 +626,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 "/api/settle": self.post_settle,
                 "/api/settings": self.post_settings,
                 "/api/users": self.post_user,
+                "/api/dimensions": self.post_dimensions,
+                "/api/odds-preview": self.post_odds_preview,
                 "/api/predictions/regenerate": self.post_regenerate,
             }
             handler = routes.get(parsed.path)
@@ -505,7 +645,7 @@ class AppHandler(BaseHTTPRequestHandler):
         date_text = query.get("date", [today_iso()])[0]
         user = get_current_user(self)
         with db() as conn:
-            predictions = ensure_predictions(conn, date_text)
+            dimensions = get_dimensions(conn)
             locked = is_locked(conn, date_text)
             guesses = conn.execute(
                 """
@@ -519,14 +659,16 @@ class AppHandler(BaseHTTPRequestHandler):
             visible_guesses = []
             for row in guesses:
                 item = dict(row)
+                fields = legacy_fields(row)
                 can_see = locked or (user and (user["is_admin"] or user["id"] == item["user_id"]))
                 visible_guesses.append(
                     {
                         "id": item["id"],
                         "name": item["name"],
                         "user_id": item["user_id"],
-                        "color": item["color"] if can_see else "已提交",
-                        "style": item["style"] if can_see else "已隐藏",
+                        "fields": fields if can_see else {},
+                        "labels": format_fields(fields, dimensions) if can_see else [],
+                        "summary": fields_summary(fields, dimensions) if can_see else "已提交，截止后公开",
                         "odds_weight": item["odds_weight"] if can_see else None,
                         "probability": item["probability"] if can_see else None,
                         "submitted_at": item["submitted_at"],
@@ -540,9 +682,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 FROM users WHERE active = 1 ORDER BY balance DESC, name ASC
                 """
             ).fetchall()
-            outfits = conn.execute(
-                "SELECT * FROM outfit_records ORDER BY date DESC LIMIT 45"
-            ).fetchall()
+            outfits = conn.execute("SELECT * FROM outfit_records ORDER BY date DESC LIMIT 45").fetchall()
             settlements = conn.execute(
                 """
                 SELECT settlements.*, users.name FROM settlements
@@ -552,6 +692,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 """
             ).fetchall()
             actual = conn.execute("SELECT * FROM outfit_records WHERE date = ?", (date_text,)).fetchone()
+            actual_fields = legacy_fields(actual)
             deadline = get_setting(conn, "guess_deadline", "10:00")
 
             json_response(
@@ -563,21 +704,19 @@ class AppHandler(BaseHTTPRequestHandler):
                     "user": public_user(user),
                     "is_locked": locked,
                     "deadline": deadline,
-                    "colors": COLORS,
-                    "styles": STYLES,
-                    "vibes": VIBES,
-                    "predictions": predictions,
-                    "top_predictions": predictions[:12],
+                    "dimensions": dimensions,
+                    "recommendations": build_recommendations(conn, date_text, dimensions),
                     "guesses": visible_guesses,
-                    "actual": row_to_dict(actual),
+                    "actual": record_payload(actual, dimensions),
                     "users": [dict(row) for row in users],
-                    "outfits": [dict(row) for row in outfits],
+                    "outfits": [record_payload(row, dimensions) for row in outfits],
                     "settlements": [dict(row) for row in settlements],
-                    "analytics": analytics(conn),
+                    "analytics": analytics(conn, dimensions),
                     "model": {
                         "version": MODEL_VERSION,
-                        "summary": "时间衰减频率 + 昨日转移影响 + 贝叶斯平滑，赔率上限 20。",
+                        "summary": "按已选择维度组成竞猜池，使用历史加权命中率 + 池子大小贝叶斯先验计算赔率。",
                     },
+                    "empty_actual_fields": actual_fields,
                 },
             )
 
@@ -598,19 +737,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"] == 0:
                 is_admin = 1
             conn.execute(
-                """
-                INSERT INTO users(name, pin_hash, salt, is_admin, created_at)
-                VALUES(?, ?, ?, ?, ?)
-                """,
+                "INSERT INTO users(name, pin_hash, salt, is_admin, created_at) VALUES(?, ?, ?, ?, ?)",
                 (name, hash_pin(pin, salt), salt, is_admin, now_ts()),
             )
             user = conn.execute("SELECT * FROM users WHERE name = ?", (name,)).fetchone()
             token = make_session(conn, user["id"])
-            json_response(
-                self,
-                {"ok": True, "user": public_user(dict(user))},
-                headers=self.session_cookie_header(token),
-            )
+            json_response(self, {"ok": True, "user": public_user(dict(user))}, headers=self.session_cookie_header(token))
 
     def post_login(self):
         data = read_json(self)
@@ -621,11 +753,7 @@ class AppHandler(BaseHTTPRequestHandler):
             if not user or not verify_pin(pin, user["salt"], user["pin_hash"]):
                 raise ValueError("昵称或 PIN 不正确。")
             token = make_session(conn, user["id"])
-            json_response(
-                self,
-                {"ok": True, "user": public_user(dict(user))},
-                headers=self.session_cookie_header(token),
-            )
+            json_response(self, {"ok": True, "user": public_user(dict(user))}, headers=self.session_cookie_header(token))
 
     def post_logout(self):
         raw_cookie = self.headers.get("Cookie", "")
@@ -644,26 +772,36 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         data = read_json(self)
         date_text = data.get("date") or today_iso()
-        color = normalize_option(data.get("color"), COLORS)
-        style = normalize_option(data.get("style"), STYLES)
         with db() as conn:
+            dimensions = get_dimensions(conn)
+            fields = normalize_fields(data.get("fields") or legacy_request_fields(data), dimensions)
             if is_locked(conn, date_text) and not user["is_admin"]:
                 raise ValueError("今日竞猜已截止或已记录实际着装。")
-            probability, odds_weight = find_prediction(conn, date_text, color, style)
+            odds = odds_for_fields(conn, date_text, fields, dimensions)
             conn.execute(
                 """
-                INSERT INTO guesses(date, user_id, color, style, odds_weight, probability, submitted_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO guesses(date, user_id, color, style, fields_json, odds_weight, probability, submitted_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(date, user_id) DO UPDATE SET
                     color = excluded.color,
                     style = excluded.style,
+                    fields_json = excluded.fields_json,
                     odds_weight = excluded.odds_weight,
                     probability = excluded.probability,
                     submitted_at = excluded.submitted_at
                 """,
-                (date_text, user["id"], color, style, odds_weight, probability, now_ts()),
+                (
+                    date_text,
+                    user["id"],
+                    fields.get("upper_color", "其他"),
+                    fields.get("top_style", "其他"),
+                    json.dumps(fields, ensure_ascii=False),
+                    odds["odds_weight"],
+                    odds["probability"],
+                    now_ts(),
+                ),
             )
-            json_response(self, {"ok": True, "probability": probability, "odds_weight": odds_weight})
+            json_response(self, {"ok": True, "fields": fields, **odds})
 
     def post_outfit(self):
         user = self.require_admin()
@@ -671,27 +809,38 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         data = read_json(self)
         date_text = data.get("date") or today_iso()
-        color = normalize_option(data.get("color"), COLORS)
-        style = normalize_option(data.get("style"), STYLES)
-        vibe = normalize_option(data.get("vibe") or "其他", VIBES)
         tags = str(data.get("tags", "")).strip()[:120]
         notes = str(data.get("notes", "")).strip()[:300]
         with db() as conn:
+            dimensions = get_dimensions(conn)
+            fields = normalize_fields(data.get("fields") or legacy_request_fields(data), dimensions)
             conn.execute(
                 """
-                INSERT INTO outfit_records(date, color, style, vibe, tags, notes, created_by, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO outfit_records(date, color, style, vibe, fields_json, tags, notes, created_by, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET
                     color = excluded.color,
                     style = excluded.style,
                     vibe = excluded.vibe,
+                    fields_json = excluded.fields_json,
                     tags = excluded.tags,
                     notes = excluded.notes,
                     updated_at = excluded.updated_at
                 """,
-                (date_text, color, style, vibe, tags, notes, user["id"], now_ts(), now_ts()),
+                (
+                    date_text,
+                    fields.get("upper_color", "其他"),
+                    fields.get("top_style", "其他"),
+                    fields.get("vibe", "其他"),
+                    json.dumps(fields, ensure_ascii=False),
+                    tags,
+                    notes,
+                    user["id"],
+                    now_ts(),
+                    now_ts(),
+                ),
             )
-            json_response(self, {"ok": True})
+            json_response(self, {"ok": True, "fields": fields})
 
     def post_settle(self):
         user = self.require_admin()
@@ -700,7 +849,7 @@ class AppHandler(BaseHTTPRequestHandler):
         data = read_json(self)
         date_text = data.get("date") or today_iso()
         with db() as conn:
-            entries = settle_date(conn, date_text)
+            entries = settle_date(conn, date_text, get_dimensions(conn))
             json_response(self, {"ok": True, "entries": len(entries)})
 
     def post_settings(self):
@@ -718,6 +867,16 @@ class AppHandler(BaseHTTPRequestHandler):
             set_setting(conn, "guess_deadline", deadline)
             json_response(self, {"ok": True})
 
+    def post_dimensions(self):
+        user = self.require_admin()
+        if not user:
+            return
+        data = read_json(self)
+        dimensions = validate_dimensions(data.get("dimensions"))
+        with db() as conn:
+            set_setting(conn, "dimensions", json.dumps(dimensions, ensure_ascii=False))
+            json_response(self, {"ok": True, "dimensions": dimensions})
+
     def post_user(self):
         user = self.require_admin()
         if not user:
@@ -731,80 +890,110 @@ class AppHandler(BaseHTTPRequestHandler):
         salt = secrets.token_hex(16)
         with db() as conn:
             conn.execute(
-                """
-                INSERT INTO users(name, pin_hash, salt, is_admin, created_at)
-                VALUES(?, ?, ?, ?, ?)
-                """,
+                "INSERT INTO users(name, pin_hash, salt, is_admin, created_at) VALUES(?, ?, ?, ?, ?)",
                 (name, hash_pin(pin, salt), salt, is_admin, now_ts()),
             )
             json_response(self, {"ok": True})
 
-    def post_regenerate(self):
-        user = self.require_admin()
+    def post_odds_preview(self):
+        user = self.require_user()
         if not user:
             return
         data = read_json(self)
         date_text = data.get("date") or today_iso()
         with db() as conn:
-            predictions = generate_predictions(conn, date_text)
-            json_response(self, {"ok": True, "count": len(predictions)})
+            dimensions = get_dimensions(conn)
+            fields = normalize_fields(data.get("fields"), dimensions)
+            json_response(self, {"ok": True, "fields": fields, **odds_for_fields(conn, date_text, fields, dimensions)})
+
+    def post_regenerate(self):
+        user = self.require_admin()
+        if not user:
+            return
+        json_response(self, {"ok": True, "model_version": MODEL_VERSION})
 
     def session_cookie_header(self, token):
-        return {
-            "Set-Cookie": f"wtw_session={token}; Max-Age={86400 * 30}; Path=/; SameSite=Lax; HttpOnly"
-        }
+        return {"Set-Cookie": f"wtw_session={token}; Max-Age={86400 * 30}; Path=/; SameSite=Lax; HttpOnly"}
+
+
+def fields_summary(fields, dimensions):
+    labels = format_fields(fields, dimensions)
+    return " / ".join("%s: %s" % (item["name"], item["value"]) for item in labels) or "未选择"
+
+
+def record_payload(row, dimensions):
+    if not row:
+        return None
+    fields = legacy_fields(row)
+    payload = dict(row)
+    payload["fields"] = fields
+    payload["labels"] = format_fields(fields, dimensions)
+    payload["summary"] = fields_summary(fields, dimensions)
+    return payload
+
+
+def legacy_request_fields(data):
+    fields = {}
+    if data.get("color"):
+        fields["upper_color"] = data.get("color")
+    if data.get("style"):
+        fields["top_style"] = data.get("style")
+    if data.get("vibe"):
+        fields["vibe"] = data.get("vibe")
+    return fields
 
 
 def clean_name(value):
     return " ".join(str(value or "").strip().split())
 
 
-def normalize_option(value, options):
-    value = str(value or "").strip()
-    return value if value in options else "其他"
-
-
 def public_user(user):
     if not user:
         return None
-    return {
-        "id": user["id"],
-        "name": user["name"],
-        "is_admin": bool(user["is_admin"]),
-    }
+    return {"id": user["id"], "name": user["name"], "is_admin": bool(user["is_admin"])}
 
 
-def analytics(conn):
-    outfits = [dict(row) for row in conn.execute("SELECT * FROM outfit_records ORDER BY date DESC LIMIT 120").fetchall()]
-    color_counts = {color: 0 for color in COLORS}
-    style_counts = {style: 0 for style in STYLES}
+def analytics(conn, dimensions):
+    outfits = [record_payload(row, dimensions) for row in conn.execute("SELECT * FROM outfit_records ORDER BY date DESC LIMIT 120").fetchall()]
+    dimension_counts = []
+    for dim in active_dimensions(dimensions):
+        counts = {option: 0 for option in dim["options"]}
+        for outfit in outfits:
+            value = (outfit.get("fields") or {}).get(dim["key"])
+            if value in counts:
+                counts[value] += 1
+        dimension_counts.append({"key": dim["key"], "name": dim["name"], "counts": counts})
+
     hit_rows = conn.execute(
         """
-        SELECT guesses.user_id, users.name,
-               SUM(CASE WHEN guesses.color = outfit_records.color AND guesses.style = outfit_records.style THEN 1 ELSE 0 END) AS hits,
-               COUNT(*) AS total
+        SELECT guesses.user_id, users.name, guesses.fields_json, outfit_records.fields_json AS actual_fields,
+               guesses.color, guesses.style, outfit_records.color AS actual_color, outfit_records.style AS actual_style
         FROM guesses
         JOIN users ON users.id = guesses.user_id
         JOIN outfit_records ON outfit_records.date = guesses.date
-        GROUP BY guesses.user_id, users.name
-        ORDER BY hits * 1.0 / total DESC, total DESC
         """
     ).fetchall()
-    for outfit in outfits:
-        color_counts[outfit["color"] if outfit["color"] in color_counts else "其他"] += 1
-        style_counts[outfit["style"] if outfit["style"] in style_counts else "其他"] += 1
+    by_user = {}
+    for row in hit_rows:
+        guess_fields = legacy_fields(row)
+        actual_fields = {}
+        try:
+            actual_fields = json.loads(row["actual_fields"] or "{}")
+        except json.JSONDecodeError:
+            actual_fields = {}
+        if not actual_fields:
+            actual_fields = {"upper_color": row["actual_color"], "top_style": row["actual_style"]}
+        item = by_user.setdefault(row["user_id"], {"name": row["name"], "hits": 0, "total": 0})
+        item["total"] += 1
+        if guess_matches_actual(guess_fields, actual_fields):
+            item["hits"] += 1
+
     return {
         "outfit_count": len(outfits),
-        "color_counts": color_counts,
-        "style_counts": style_counts,
+        "dimension_counts": dimension_counts,
         "hit_rates": [
-            {
-                "name": row["name"],
-                "hits": row["hits"],
-                "total": row["total"],
-                "rate": round((row["hits"] or 0) / row["total"], 3) if row["total"] else 0,
-            }
-            for row in hit_rows
+            {"name": item["name"], "hits": item["hits"], "total": item["total"], "rate": round(item["hits"] / item["total"], 3) if item["total"] else 0}
+            for item in sorted(by_user.values(), key=lambda value: (-value["hits"] / max(value["total"], 1), -value["total"]))
         ],
     }
 
