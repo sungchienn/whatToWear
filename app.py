@@ -337,11 +337,11 @@ def parse_option_config(option):
     text = str(option).strip()
     if "|" in text:
         label, probability = text.rsplit("|", 1)
-        return label.strip(), parse_probability(probability)
+        return label.strip(), parse_probability(probability, percent=True)
     return text, None
 
 
-def parse_probability(value):
+def parse_probability(value, percent=False):
     if value is None or value == "":
         return None
     try:
@@ -350,7 +350,7 @@ def parse_probability(value):
         return None
     if number <= 0:
         return None
-    if number > 1:
+    if percent or number > 1:
         number = number / 100.0
     return number
 

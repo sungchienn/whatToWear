@@ -76,7 +76,7 @@ function optionLine(dim, option) {
 function parseOptionLine(line) {
   const [labelPart, probabilityPart] = line.split("|");
   const label = (labelPart || "").trim();
-  const probability = Number((probabilityPart || "").trim());
+  const probability = Number((probabilityPart || "").trim()) / 100;
   return probability > 0 ? { label, probability } : { label };
 }
 
