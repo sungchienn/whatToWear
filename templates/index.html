@@ -52,6 +52,7 @@
         <button class="tab active" data-tab="today" type="button">竞猜</button>
         <button class="tab" data-tab="odds" type="button">赔率</button>
         <button class="tab" data-tab="record" type="button">记录</button>
+        <button class="tab" data-tab="settlement" type="button">结算</button>
         <button class="tab" data-tab="rank" type="button">积分</button>
         <button class="tab admin-only hidden" data-tab="admin" type="button">管理</button>
       </nav>
@@ -144,11 +145,15 @@
           <article class="tool-panel admin-only">
             <div class="section-title">
               <h2>实际着装</h2>
-              <button id="settleBtn" class="secondary-action" type="button">结算</button>
+              <span>记录后可结算</span>
             </div>
             <form id="outfitForm">
               <div id="actualFields" class="field-grid actual-grid"></div>
               <div class="form-grid notes-grid">
+                <label>
+                  记录时间
+                  <input id="actualObservedAt" type="datetime-local" />
+                </label>
                 <label>
                   标签
                   <input id="actualTags" placeholder="如：会议日、加班、雨天" maxlength="120" />
@@ -167,6 +172,26 @@
               <span id="historyCount2">0 条</span>
             </div>
             <div id="historyList" class="list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" data-panel="settlement">
+        <div class="layout two-col">
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>当日结算</h2>
+              <button id="settleBtn" class="primary-action admin-only hidden" type="button">确认结算</button>
+            </div>
+            <div id="settlementSummary" class="settlement-summary"></div>
+            <div id="settlementPreviewList" class="list"></div>
+          </article>
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>兑现建议</h2>
+              <span>按积分抵扣</span>
+            </div>
+            <div id="transferList" class="list compact-list"></div>
           </article>
         </div>
       </section>

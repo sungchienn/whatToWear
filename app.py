@@ -185,6 +185,7 @@ def init_db():
                 tags TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
                 created_by INTEGER REFERENCES users(id),
+                observed_at INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
@@ -222,6 +223,8 @@ def init_db():
             conn.execute("ALTER TABLE guesses ADD COLUMN fields_json TEXT DEFAULT '{}'")
         if not column_exists(conn, "outfit_records", "fields_json"):
             conn.execute("ALTER TABLE outfit_records ADD COLUMN fields_json TEXT DEFAULT '{}'")
+        if not column_exists(conn, "outfit_records", "observed_at"):
+            conn.execute("ALTER TABLE outfit_records ADD COLUMN observed_at INTEGER")
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", ("guess_deadline", "10:00"))
         conn.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
@@ -589,18 +592,113 @@ def current_balance(conn, user_id):
     return float(row["balance_after"]) if row else 0.0
 
 
+def clean_timestamp(value):
+    try:
+        timestamp = int(float(value))
+    except (TypeError, ValueError):
+        return now_ts()
+    if timestamp <= 0:
+        return now_ts()
+    return timestamp
+
+
 def guess_matches_actual(guess_fields, actual_fields):
     if not guess_fields:
         return False
     return all(actual_fields.get(key) == value for key, value in guess_fields.items())
 
 
-def settle_date(conn, date_text, dimensions):
+def allocate_weighted_rewards(pool, winners):
+    if not winners:
+        return {}
+    total_cents = int(round(pool * 100))
+    total_weight = sum(max(float(winner.get("odds_weight") or 0), 0.01) for winner in winners)
+    portions = []
+    used = 0
+    for winner in winners:
+        raw = total_cents * max(float(winner.get("odds_weight") or 0), 0.01) / total_weight
+        cents = int(math.floor(raw))
+        portions.append({"user_id": winner["user_id"], "cents": cents, "remainder": raw - cents})
+        used += cents
+    remaining = total_cents - used
+    portions.sort(key=lambda item: (-item["remainder"], item["user_id"]))
+    for item in portions[:remaining]:
+        item["cents"] += 1
+    return {item["user_id"]: round(item["cents"] / 100.0, 2) for item in portions}
+
+
+def settlement_transfers(entries):
+    debtors = [
+        {"name": entry["name"], "amount": round(abs(float(entry["delta"])), 2)}
+        for entry in entries
+        if float(entry["delta"]) < 0
+    ]
+    creditors = [
+        {"name": entry["name"], "amount": round(float(entry["delta"]), 2)}
+        for entry in entries
+        if float(entry["delta"]) > 0
+    ]
+    transfers = []
+    debtor_index = 0
+    creditor_index = 0
+    while debtor_index < len(debtors) and creditor_index < len(creditors):
+        amount = round(min(debtors[debtor_index]["amount"], creditors[creditor_index]["amount"]), 2)
+        if amount > 0:
+            transfers.append(
+                {
+                    "from": debtors[debtor_index]["name"],
+                    "to": creditors[creditor_index]["name"],
+                    "amount": amount,
+                }
+            )
+        debtors[debtor_index]["amount"] = round(debtors[debtor_index]["amount"] - amount, 2)
+        creditors[creditor_index]["amount"] = round(creditors[creditor_index]["amount"] - amount, 2)
+        if debtors[debtor_index]["amount"] <= 0:
+            debtor_index += 1
+        if creditors[creditor_index]["amount"] <= 0:
+            creditor_index += 1
+    return transfers
+
+
+def settlement_preview(conn, date_text, dimensions):
     outfit = conn.execute("SELECT * FROM outfit_records WHERE date = ?", (date_text,)).fetchone()
     if not outfit:
-        raise ValueError("请先记录当天实际着装。")
-    if conn.execute("SELECT 1 FROM settlements WHERE date = ?", (date_text,)).fetchone():
-        raise ValueError("这一天已经结算过。")
+        return {
+            "date": date_text,
+            "status": "no_outfit",
+            "message": "请先记录当天实际着装。",
+            "can_settle": False,
+            "settled": False,
+            "stake": 1.0,
+            "pool": 0.0,
+            "winner_weight": 0.0,
+            "entries": [],
+            "transfers": [],
+        }
+
+    existing = conn.execute(
+        """
+        SELECT settlements.*, users.name FROM settlements
+        JOIN users ON users.id = settlements.user_id
+        WHERE settlements.date = ?
+        ORDER BY settlements.id ASC
+        """,
+        (date_text,),
+    ).fetchall()
+    if existing:
+        entries = [dict(row) for row in existing]
+        return {
+            "date": date_text,
+            "status": "settled",
+            "message": "这一天已经结算过。",
+            "can_settle": False,
+            "settled": True,
+            "stake": 1.0,
+            "pool": round(sum(abs(float(entry["delta"])) for entry in entries if float(entry["delta"]) < 0), 2),
+            "winner_weight": 0.0,
+            "entries": entries,
+            "transfers": settlement_transfers(entries),
+        }
 
     actual_fields = legacy_fields(outfit)
     guesses = conn.execute(
@@ -612,7 +710,18 @@ def settle_date(conn, date_text, dimensions):
         (date_text,),
     ).fetchall()
     if not guesses:
-        raise ValueError("这一天还没有人提交竞猜。")
+        return {
+            "date": date_text,
+            "status": "no_guesses",
+            "message": "这一天还没有人提交竞猜。",
+            "can_settle": False,
+            "settled": False,
+            "stake": 1.0,
+            "pool": 0.0,
+            "winner_weight": 0.0,
+            "entries": [],
+            "transfers": [],
+        }
 
     winners = []
     losers = []
@@ -626,29 +735,115 @@ def settle_date(conn, date_text, dimensions):
 
     entries = []
     if not winners or not losers:
+        status = "void_all_right" if winners else "void_all_wrong"
         for guess in guesses:
             before = current_balance(conn, guess["user_id"])
-            result = "void_all_right" if winners else "void_all_wrong"
-            entries.append((date_text, guess["user_id"], result, 0.0, before, now_ts()))
+            fields = legacy_fields(guess)
+            entries.append(
+                {
+                    "date": date_text,
+                    "user_id": guess["user_id"],
+                    "name": guess["name"],
+                    "result": status,
+                    "delta": 0.0,
+                    "balance_before": before,
+                    "balance_after": before,
+                    "odds_weight": guess["odds_weight"],
+                    "fields": fields,
+                    "labels": format_fields(fields, dimensions),
+                }
+            )
     else:
         pool = float(len(losers))
-        total_weight = sum(max(winner["odds_weight"], 0.01) for winner in winners)
+        rewards = allocate_weighted_rewards(pool, winners)
         for loser in losers:
             before = current_balance(conn, loser["user_id"])
-            entries.append((date_text, loser["user_id"], "miss", -1.0, before - 1.0, now_ts()))
+            entries.append(
+                {
+                    "date": date_text,
+                    "user_id": loser["user_id"],
+                    "name": loser["name"],
+                    "result": "miss",
+                    "delta": -1.0,
+                    "balance_before": before,
+                    "balance_after": before - 1.0,
+                    "odds_weight": loser["odds_weight"],
+                    "fields": loser["fields"],
+                    "labels": format_fields(loser["fields"], dimensions),
+                }
+            )
         for winner in winners:
-            reward = round(pool * max(winner["odds_weight"], 0.01) / total_weight, 2)
+            reward = rewards[winner["user_id"]]
             before = current_balance(conn, winner["user_id"])
-            entries.append((date_text, winner["user_id"], "hit", reward, before + reward, now_ts()))
+            entries.append(
+                {
+                    "date": date_text,
+                    "user_id": winner["user_id"],
+                    "name": winner["name"],
+                    "result": "hit",
+                    "delta": reward,
+                    "balance_before": before,
+                    "balance_after": before + reward,
+                    "odds_weight": winner["odds_weight"],
+                    "fields": winner["fields"],
+                    "labels": format_fields(winner["fields"], dimensions),
+                }
+            )
+
+    pool = round(sum(abs(float(entry["delta"])) for entry in entries if float(entry["delta"]) < 0), 2)
+    winner_weight = round(sum(max(float(entry.get("odds_weight") or 0), 0.01) for entry in entries if entry["result"] == "hit"), 2)
+    return {
+        "date": date_text,
+        "status": entries[0]["result"] if entries and entries[0]["result"].startswith("void") else "pending",
+        "message": settlement_message(entries, pool),
+        "can_settle": True,
+        "settled": False,
+        "stake": 1.0,
+        "pool": pool,
+        "winner_weight": winner_weight,
+        "entries": entries,
+        "transfers": settlement_transfers(entries),
+    }
+
+
+def settlement_message(entries, pool):
+    if not entries:
+        return "暂无可结算数据。"
+    if entries[0]["result"] == "void_all_right":
+        return "全员猜中，当日作废，不产生积分变动。"
+    if entries[0]["result"] == "void_all_wrong":
+        return "全员猜错，当日作废，不产生积分变动。"
+    winners = sum(1 for entry in entries if entry["result"] == "hit")
+    losers = sum(1 for entry in entries if entry["result"] == "miss")
+    return "猜中 %d 人，猜错 %d 人，输家积分池 %.2f。" % (winners, losers, pool)
+
+
+def settle_date(conn, date_text, dimensions):
+    preview = settlement_preview(conn, date_text, dimensions)
+    if not preview["can_settle"]:
+        raise ValueError(preview["message"])
+
+    now = now_ts()
+    rows = [
+        (
+            entry["date"],
+            entry["user_id"],
+            entry["result"],
+            entry["delta"],
+            entry["balance_after"],
+            now,
+        )
+        for entry in preview["entries"]
+    ]
 
     conn.executemany(
         """
         INSERT INTO settlements(date, user_id, result, delta, balance_after, created_at)
         VALUES(?, ?, ?, ?, ?, ?)
         """,
-        entries,
+        rows,
     )
-    return entries
+    return preview["entries"]
 
 
 def json_response(handler, payload, status=200, headers=None):
@@ -827,6 +1022,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "users": [dict(row) for row in users],
                     "outfits": [record_payload(row, dimensions) for row in outfits],
                     "settlements": [dict(row) for row in settlements],
+                    "settlement_preview": settlement_preview(conn, date_text, dimensions),
                     "analytics": analytics(conn, dimensions),
                     "model": {
                         "version": MODEL_VERSION,
@@ -925,6 +1121,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         data = read_json(self)
         date_text = data.get("date") or today_iso()
+        observed_at = clean_timestamp(data.get("observed_at"))
         tags = str(data.get("tags", "")).strip()[:120]
         notes = str(data.get("notes", "")).strip()[:300]
         with db() as conn:
@@ -932,8 +1129,8 @@ class AppHandler(BaseHTTPRequestHandler):
             fields = normalize_fields(data.get("fields") or legacy_request_fields(data), dimensions)
             conn.execute(
                 """
-                INSERT INTO outfit_records(date, color, style, vibe, fields_json, tags, notes, created_by, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO outfit_records(date, color, style, vibe, fields_json, tags, notes, created_by, observed_at, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET
                     color = excluded.color,
                     style = excluded.style,
@@ -941,6 +1138,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     fields_json = excluded.fields_json,
                     tags = excluded.tags,
                     notes = excluded.notes,
+                    observed_at = excluded.observed_at,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -952,6 +1150,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     tags,
                     notes,
                     user["id"],
+                    observed_at,
                     now_ts(),
                     now_ts(),
                 ),
@@ -1042,6 +1241,7 @@ def record_payload(row, dimensions):
         return None
     fields = legacy_fields(row)
     payload = dict(row)
+    payload["observed_at"] = payload.get("observed_at") or payload.get("created_at")
     payload["fields"] = fields
     payload["labels"] = format_fields(fields, dimensions)
     payload["summary"] = fields_summary(fields, dimensions)

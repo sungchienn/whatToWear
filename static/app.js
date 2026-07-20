@@ -90,6 +90,24 @@ function formatTs(seconds) {
   });
 }
 
+function dateTimeInputValue(seconds) {
+  const date = seconds ? new Date(seconds * 1000) : new Date();
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function defaultObservedAtValue() {
+  const now = new Date();
+  const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  return `${state.selectedDate || new Date().toISOString().slice(0, 10)}T${time}`;
+}
+
+function observedAtTimestamp() {
+  const value = $("#actualObservedAt").value;
+  const timestamp = value ? Math.floor(new Date(value).getTime() / 1000) : Math.floor(Date.now() / 1000);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Math.floor(Date.now() / 1000);
+}
+
 function activeDimensions() {
   return (state.data?.dimensions || []).filter((dim) => dim.active);
 }
@@ -136,6 +154,7 @@ function render() {
   renderHistory();
   renderLeaderboard();
   renderSettlements();
+  renderSettlementPreview();
   renderBars();
   renderDimensionEditor();
   updatePreview();
@@ -170,6 +189,7 @@ function renderActualFields() {
       </label>
     `;
   }).join("");
+  $("#actualObservedAt").value = state.data.actual?.observed_at ? dateTimeInputValue(state.data.actual.observed_at) : defaultObservedAtValue();
   $("#actualTags").value = state.data.actual?.tags || "";
   $("#actualNotes").value = state.data.actual?.notes || "";
 }
@@ -242,6 +262,7 @@ function renderHistory() {
           <div class="pill-row">
             ${item.labels.slice(0, 8).map((label) => `<span class="pill">${escapeHtml(label.name)}: ${escapeHtml(label.value)}</span>`).join("")}
           </div>
+          ${item.observed_at ? `<small>记录时间 ${formatTs(item.observed_at)}</small>` : ""}
           ${item.notes ? `<small>${escapeHtml(item.notes)}</small>` : ""}
         </div>
       </div>
@@ -272,6 +293,55 @@ function renderSettlements() {
       </div>
     `).join("")
     : `<div class="list-item"><div><strong>暂无结算</strong><small>记录实际着装后可结算。</small></div></div>`;
+}
+
+function renderSettlementPreview() {
+  const preview = state.data.settlement_preview || {};
+  const entries = preview.entries || [];
+  const canSettle = Boolean(preview.can_settle && !preview.settled);
+  $("#settleBtn").disabled = !canSettle;
+  $("#settleBtn").textContent = preview.settled ? "已结算" : "确认结算";
+  $("#settlementSummary").innerHTML = `
+    <div>
+      <span>状态</span>
+      <strong>${escapeHtml(preview.message || "暂无结算数据。")}</strong>
+    </div>
+    <div>
+      <span>输家积分池</span>
+      <strong>${Number(preview.pool || 0).toFixed(2)}</strong>
+    </div>
+    <div>
+      <span>赢家赔率权重</span>
+      <strong>${Number(preview.winner_weight || 0).toFixed(2)}</strong>
+    </div>
+  `;
+  $("#settlementPreviewList").innerHTML = entries.length
+    ? entries.map((item) => `
+      <div class="list-item settlement-row ${item.result}">
+        <div>
+          <strong>${escapeHtml(item.name)} · ${labelResult(item.result)}</strong>
+          <div class="pill-row">
+            ${(item.labels || []).map((label) => `<span class="pill">${escapeHtml(label.name)}: ${escapeHtml(label.value)}</span>`).join("")}
+            ${item.odds_weight ? `<span class="pill hot">${Number(item.odds_weight).toFixed(2)} 倍</span>` : ""}
+          </div>
+          ${typeof item.balance_before === "number" ? `<small>余额 ${Number(item.balance_before).toFixed(2)} -> ${Number(item.balance_after).toFixed(2)}</small>` : `<small>余额 ${Number(item.balance_after || 0).toFixed(2)}</small>`}
+        </div>
+        <strong>${Number(item.delta || 0).toFixed(2)}</strong>
+      </div>
+    `).join("")
+    : `<div class="list-item"><div><strong>暂无结算明细</strong><small>需要先有竞猜和实际着装记录。</small></div></div>`;
+
+  const transfers = preview.transfers || [];
+  $("#transferList").innerHTML = transfers.length
+    ? transfers.map((item) => `
+      <div class="list-item">
+        <div>
+          <strong>${escapeHtml(item.from)} -> ${escapeHtml(item.to)}</strong>
+          <small>兑现 ${Number(item.amount).toFixed(2)} 份奶茶积分</small>
+        </div>
+      </div>
+    `).join("")
+    : `<div class="list-item"><div><strong>暂无转账建议</strong><small>作废或尚未形成输赢时不会产生兑现关系。</small></div></div>`;
 }
 
 function labelResult(result) {
@@ -478,6 +548,7 @@ function bindEvents() {
         body: JSON.stringify({
           date: state.selectedDate,
           fields: collectActualFields(),
+          observed_at: observedAtTimestamp(),
           tags: $("#actualTags").value,
           notes: $("#actualNotes").value,
         }),

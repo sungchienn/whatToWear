@@ -245,7 +245,7 @@ textarea {
   top: 0;
   z-index: 10;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, minmax(72px, 1fr));
   gap: 6px;
   margin: 4px 0 16px;
   border: 1px solid var(--line);
@@ -253,6 +253,7 @@ textarea {
   background: rgba(246, 245, 242, 0.92);
   padding: 5px;
   backdrop-filter: blur(10px);
+  overflow-x: auto;
 }
 
 .status-grid {
@@ -546,6 +547,35 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.settlement-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.settlement-summary > div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.settlement-summary span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+
+.settlement-row.hit {
+  border-color: rgba(22, 108, 104, .35);
+}
+
+.settlement-row.miss {
+  border-color: rgba(196, 87, 46, .35);
+}
+
 .compact-list .list-item {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -666,7 +696,8 @@ textarea {
   .preview-layout,
   .two-col,
   .actual-grid,
-  .odds-grid {
+  .odds-grid,
+  .settlement-summary {
     grid-template-columns: 1fr;
   }
 
@@ -705,7 +736,7 @@ textarea {
     top: auto;
     margin: 0;
     box-shadow: var(--shadow);
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, minmax(54px, 1fr));
   }
 
   .tab {
