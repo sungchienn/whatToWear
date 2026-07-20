@@ -238,8 +238,47 @@
               <button class="primary-action" type="submit">保存设置</button>
             </form>
             <div class="admin-note">
+              <strong>配置导入导出</strong>
+              <p>导出会包含维度、截止时间、AI 设置和 AI 概率结果，但不会导出 API Key。</p>
+              <div class="button-row">
+                <button id="exportConfigBtn" class="secondary-action" type="button">导出配置</button>
+                <label class="secondary-action file-action">
+                  导入配置
+                  <input id="importConfigInput" type="file" accept="application/json" />
+                </label>
+              </div>
+            </div>
+            <form id="aiSettingsForm" class="form-grid">
+              <label class="inline-check wide">
+                <input id="aiEnabled" type="checkbox" />
+                启用 AI 赔率
+              </label>
+              <label>
+                AI 占比
+                <input id="aiWeightInput" type="number" min="0" max="100" step="1" />
+              </label>
+              <label>
+                模型
+                <input id="aiModelInput" placeholder="gpt-4.1-mini" />
+              </label>
+              <label class="wide">
+                接口地址
+                <input id="aiEndpointInput" placeholder="https://api.openai.com/v1/chat/completions" />
+              </label>
+              <label class="wide">
+                API Key
+                <input id="aiKeyInput" type="password" placeholder="留空则不修改已保存 Key" autocomplete="off" />
+              </label>
+              <label class="wide">
+                天气/额外信息
+                <textarea id="aiWeatherInput" maxlength="500" placeholder="如：上海，小雨，18-24 度，周一"></textarea>
+              </label>
+              <button class="primary-action" type="submit">保存 AI 设置</button>
+              <button id="refreshAiOddsBtn" class="secondary-action" type="button">调用 AI 更新赔率</button>
+            </form>
+            <div class="admin-note">
               <strong>赔率逻辑</strong>
-              <p>每个选项都有人工初始可能性。系统会用实际着装记录动态修正它，样本少时更相信人工设置，样本多时逐步相信历史表现。只猜一个维度时只算该维度；猜多个维度时会融合各维度概率和完整组合记录。</p>
+              <p>每个选项都有人工初始可能性。启用 AI 后，系统会先按设置比例混合 AI 概率和人工概率，再用实际着装记录动态修正它。样本少时更相信初始设置，样本多时逐步相信历史表现。</p>
             </div>
           </article>
         </div>

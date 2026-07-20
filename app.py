@@ -10,6 +10,8 @@ import re
 import secrets
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -24,8 +26,9 @@ PORT = int(os.environ.get("PORT", "8008"))
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-change-this-secret")
 USER_INVITE_CODE = os.environ.get("USER_INVITE_CODE", "wear2026")
 ADMIN_INVITE_CODE = os.environ.get("ADMIN_INVITE_CODE", "admin2026")
-MODEL_VERSION = "weighted-prior-bayes-v3"
+MODEL_VERSION = "weighted-ai-prior-v4"
 ODDS_CAP = 50.0
+UNKNOWN_VALUE = "未知"
 
 DEFAULT_OPTION_WEIGHTS = {
     "hair_style": {"短发": 0.26, "长发": 0.22, "马尾": 0.18, "卷发": 0.12, "丸子头": 0.08, "帽子压住看不清": 0.06, "今天头发很有想法": 0.08},
@@ -230,6 +233,14 @@ def init_db():
             "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
             ("dimensions", json.dumps(DEFAULT_DIMENSIONS, ensure_ascii=False)),
         )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
+            ("ai_odds_config", json.dumps(default_ai_config(), ensure_ascii=False)),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
+            ("ai_option_weights", "{}"),
+        )
 
 
 def hash_pin(pin, salt):
@@ -274,6 +285,198 @@ def get_dimensions(conn):
     except json.JSONDecodeError:
         dims = DEFAULT_DIMENSIONS
     return validate_dimensions(dims, forgiving=True)
+
+
+def default_ai_config():
+    return {
+        "enabled": False,
+        "provider": "openai-compatible",
+        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "model": "gpt-4.1-mini",
+        "ai_weight": 0.5,
+        "weather": "",
+    }
+
+
+def get_json_setting(conn, key, default):
+    raw = get_setting(conn, key)
+    try:
+        value = json.loads(raw) if raw else default
+    except json.JSONDecodeError:
+        value = default
+    return value if isinstance(value, type(default)) else default
+
+
+def get_ai_config(conn, include_secret=False):
+    config = default_ai_config()
+    raw = get_json_setting(conn, "ai_odds_config", {})
+    if isinstance(raw, dict):
+        config.update(raw)
+    config["enabled"] = bool(config.get("enabled"))
+    config["endpoint"] = str(config.get("endpoint") or default_ai_config()["endpoint"]).strip()
+    config["model"] = str(config.get("model") or default_ai_config()["model"]).strip()
+    config["weather"] = str(config.get("weather") or "").strip()[:500]
+    try:
+        config["ai_weight"] = max(0.0, min(1.0, float(config.get("ai_weight", 0.5))))
+    except (TypeError, ValueError):
+        config["ai_weight"] = 0.5
+    if not include_secret:
+        config.pop("api_key", None)
+        config["has_api_key"] = bool(raw.get("api_key")) if isinstance(raw, dict) else False
+    return config
+
+
+def save_ai_config(conn, incoming):
+    current = get_ai_config(conn, include_secret=True)
+    incoming = incoming or {}
+    if not isinstance(incoming, dict):
+        raise ValueError("AI 配置格式不正确。")
+    for key in ["enabled", "endpoint", "model", "weather"]:
+        if key in incoming:
+            current[key] = incoming[key]
+    if "ai_weight" in incoming:
+        current["ai_weight"] = incoming["ai_weight"]
+    if "api_key" in incoming and str(incoming.get("api_key") or "").strip():
+        current["api_key"] = str(incoming.get("api_key")).strip()
+    cleaned = get_ai_config_from_raw(current, include_secret=True)
+    set_setting(conn, "ai_odds_config", json.dumps(cleaned, ensure_ascii=False))
+    return cleaned
+
+
+def get_ai_config_from_raw(raw, include_secret=False):
+    config = default_ai_config()
+    if isinstance(raw, dict):
+        config.update(raw)
+    config["enabled"] = bool(config.get("enabled"))
+    config["endpoint"] = str(config.get("endpoint") or default_ai_config()["endpoint"]).strip()[:300]
+    config["model"] = str(config.get("model") or default_ai_config()["model"]).strip()[:120]
+    config["weather"] = str(config.get("weather") or "").strip()[:500]
+    try:
+        config["ai_weight"] = max(0.0, min(1.0, float(config.get("ai_weight", 0.5))))
+    except (TypeError, ValueError):
+        config["ai_weight"] = 0.5
+    if include_secret and raw.get("api_key"):
+        config["api_key"] = str(raw.get("api_key")).strip()
+    return config
+
+
+def get_ai_option_weights(conn):
+    raw = get_json_setting(conn, "ai_option_weights", {})
+    return raw if isinstance(raw, dict) else {}
+
+
+def public_config_payload(conn):
+    return {
+        "version": 1,
+        "exported_at": now_ts(),
+        "deadline": get_setting(conn, "guess_deadline", "10:00"),
+        "dimensions": get_dimensions(conn),
+        "ai_config": get_ai_config(conn),
+        "ai_option_weights": get_ai_option_weights(conn),
+    }
+
+
+def normalize_ai_option_weights(raw_weights, dimensions):
+    if not isinstance(raw_weights, dict):
+        raise ValueError("AI 返回的概率格式不正确。")
+    normalized = {}
+    dims = dimension_map(dimensions)
+    for key, dim in dims.items():
+        values = {}
+        source = raw_weights.get(key) or raw_weights.get(dim["name"]) or {}
+        if not isinstance(source, dict):
+            continue
+        for option in dim["options"]:
+            value = parse_probability(source.get(option))
+            if value is not None:
+                values[option] = value
+        if values:
+            normalized[key] = normalize_option_weights(dim["options"], values)
+    if not normalized:
+        raise ValueError("AI 没有返回任何可用选项概率。")
+    return normalized
+
+
+def ai_training_payload(conn, date_text, dimensions):
+    rows = conn.execute(
+        "SELECT * FROM outfit_records WHERE date < ? ORDER BY date DESC LIMIT 120",
+        (date_text,),
+    ).fetchall()
+    history = []
+    for row in rows:
+        history.append(
+            {
+                "date": row["date"],
+                "observed_at": row["observed_at"] if "observed_at" in row.keys() else row["created_at"],
+                "fields": known_fields(legacy_fields(row)),
+                "tags": row["tags"] if "tags" in row.keys() else "",
+                "notes": row["notes"] if "notes" in row.keys() else "",
+            }
+        )
+    return {
+        "target_date": date_text,
+        "dimensions": [
+            {"key": dim["key"], "name": dim["name"], "options": dim["options"]}
+            for dim in active_dimensions(dimensions)
+        ],
+        "history": history,
+    }
+
+
+def call_ai_for_option_weights(conn, date_text, dimensions):
+    config = get_ai_config(conn, include_secret=True)
+    if not config.get("enabled"):
+        raise ValueError("请先启用 AI 赔率。")
+    if not config.get("api_key"):
+        raise ValueError("请先填写 AI API Key。")
+
+    payload = ai_training_payload(conn, date_text, dimensions)
+    user_content = {
+        **payload,
+        "weather": config.get("weather", ""),
+        "output_schema": {
+            "dimension_key": {"option_label": "probability number, 0-1 or percent"},
+        },
+    }
+    body = {
+        "model": config["model"],
+        "temperature": 0.2,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是服装竞猜赔率助手。只返回 JSON 对象，不要 Markdown。为每个维度的每个已有选项估计目标日期穿着概率，未知选项不要输出。",
+            },
+            {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
+        ],
+    }
+    request = urllib.request.Request(
+        config["endpoint"],
+        data=json.dumps(body, ensure_ascii=False).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer %s" % config["api_key"],
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            raw = response.read().decode()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="ignore")[:500]
+        raise ValueError("AI 接口返回错误：%s %s" % (exc.code, detail))
+    except urllib.error.URLError as exc:
+        raise ValueError("AI 接口请求失败：%s" % exc.reason)
+
+    try:
+        response_payload = json.loads(raw)
+        content = response_payload["choices"][0]["message"]["content"]
+        weights = json.loads(content)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        raise ValueError("AI 返回内容不是可解析的概率 JSON。")
+    normalized = normalize_ai_option_weights(weights, dimensions)
+    set_setting(conn, "ai_option_weights", json.dumps(normalized, ensure_ascii=False))
+    set_setting(conn, "ai_option_weights_updated_at", str(now_ts()))
+    return normalized
 
 
 def validate_dimensions(raw_dims, forgiving=False):
@@ -373,7 +576,7 @@ def dimension_map(dimensions):
     return {dim["key"]: dim for dim in dimensions}
 
 
-def normalize_fields(raw_fields, dimensions, allow_empty=False):
+def normalize_fields(raw_fields, dimensions, allow_empty=False, allow_unknown=False):
     raw_fields = raw_fields or {}
     if not isinstance(raw_fields, dict):
         raise ValueError("竞猜字段格式不正确。")
@@ -383,11 +586,15 @@ def normalize_fields(raw_fields, dimensions, allow_empty=False):
         if key not in dims:
             continue
         value = str(value).strip()
-        if value in dims[key]["options"]:
+        if value in dims[key]["options"] or (allow_unknown and value == UNKNOWN_VALUE):
             fields[key] = value
     if not fields and not allow_empty:
         raise ValueError("至少选择一个可竞猜维度。")
     return fields
+
+
+def known_fields(fields):
+    return {key: value for key, value in (fields or {}).items() if value != UNKNOWN_VALUE}
 
 
 def legacy_fields(row):
@@ -435,27 +642,37 @@ def selected_pool_size(fields, dimensions):
     return max(1, size)
 
 
-def option_probability(dim, value):
+def option_probability(dim, value, ai_option_weights=None, ai_weight=0.0):
     weights = dim.get("option_weights") or {}
-    if value in weights:
-        return max(0.0001, float(weights[value]))
-    return 1.0 / max(1, len(dim.get("options") or []))
+    manual = float(weights[value]) if value in weights else 1.0 / max(1, len(dim.get("options") or []))
+    ai_probability = None
+    if isinstance(ai_option_weights, dict):
+        dim_weights = ai_option_weights.get(dim["key"]) or {}
+        if isinstance(dim_weights, dict) and value in dim_weights:
+            try:
+                ai_probability = float(dim_weights[value])
+            except (TypeError, ValueError):
+                ai_probability = None
+    if ai_probability is not None:
+        blend = max(0.0, min(1.0, float(ai_weight or 0.0)))
+        return max(0.0001, manual * (1.0 - blend) + ai_probability * blend)
+    return max(0.0001, manual)
 
 
-def fields_prior_probability(fields, dimensions):
+def fields_prior_probability(fields, dimensions, ai_option_weights=None, ai_weight=0.0):
     dims = dimension_map(dimensions)
     probability = 1.0
     for key, value in fields.items():
         if key in dims:
-            probability *= option_probability(dims[key], value)
+            probability *= option_probability(dims[key], value, ai_option_weights, ai_weight)
     return max(0.000001, probability)
 
 
-def dimension_posterior_probability(rows, target_date, dim, value):
+def dimension_posterior_probability(rows, target_date, dim, value, ai_option_weights=None, ai_weight=0.0):
     total_weight = 0.0
     match_weight = 0.0
     for row in rows:
-        record_fields = legacy_fields(row)
+        record_fields = known_fields(legacy_fields(row))
         if dim["key"] not in record_fields:
             continue
         days = max(0, (target_date - parse_date(row["date"])).days)
@@ -463,20 +680,29 @@ def dimension_posterior_probability(rows, target_date, dim, value):
         total_weight += weight
         if record_fields.get(dim["key"]) == value:
             match_weight += weight
-    prior = option_probability(dim, value)
+    manual_prior = option_probability(dim, value)
+    ai_prior = option_probability(dim, value, ai_option_weights, 1.0) if ai_option_weights else manual_prior
+    prior = option_probability(dim, value, ai_option_weights, ai_weight)
     prior_strength = max(0.5, min(20.0, float(dim.get("prior_strength", 4.0) or 4.0)))
     return {
         "probability": (match_weight + prior_strength * prior) / (total_weight + prior_strength),
         "sample_weight": total_weight,
         "match_weight": match_weight,
         "prior_probability": prior,
+        "manual_prior_probability": manual_prior,
+        "ai_prior_probability": ai_prior,
     }
 
 
 def odds_for_fields(conn, date_text, fields, dimensions):
     fields = normalize_fields(fields, dimensions)
     pool_size = selected_pool_size(fields, dimensions)
-    prior_probability = fields_prior_probability(fields, dimensions)
+    ai_config = get_ai_config(conn)
+    ai_weight = ai_config["ai_weight"] if ai_config.get("enabled") else 0.0
+    ai_option_weights = get_ai_option_weights(conn) if ai_weight > 0 else {}
+    prior_probability = fields_prior_probability(fields, dimensions, ai_option_weights, ai_weight)
+    manual_prior_probability = fields_prior_probability(fields, dimensions)
+    ai_prior_probability = fields_prior_probability(fields, dimensions, ai_option_weights, 1.0) if ai_option_weights else manual_prior_probability
     target_date = parse_date(date_text)
     rows = conn.execute(
         "SELECT * FROM outfit_records WHERE date < ? ORDER BY date ASC",
@@ -491,12 +717,12 @@ def odds_for_fields(conn, date_text, fields, dimensions):
     for key, value in fields.items():
         if key not in dims:
             continue
-        stat = dimension_posterior_probability(rows, target_date, dims[key], value)
+        stat = dimension_posterior_probability(rows, target_date, dims[key], value, ai_option_weights, ai_weight)
         independent_probability *= stat["probability"]
         field_stats.append({"key": key, "value": value, **{k: round(v, 5) for k, v in stat.items()}})
 
     for row in rows:
-        record_fields = legacy_fields(row)
+        record_fields = known_fields(legacy_fields(row))
         if not all(key in record_fields for key in fields):
             continue
         days = max(0, (target_date - parse_date(row["date"])).days)
@@ -516,6 +742,9 @@ def odds_for_fields(conn, date_text, fields, dimensions):
         "odds_weight": round(odds_weight, 2),
         "pool_size": pool_size,
         "prior_probability": round(prior_probability, 5),
+        "manual_prior_probability": round(manual_prior_probability, 5),
+        "ai_prior_probability": round(ai_prior_probability, 5),
+        "ai_blend_weight": round(ai_weight, 3),
         "independent_probability": round(independent_probability, 5),
         "combo_probability": round(combo_probability, 5),
         "combo_confidence": round(combo_confidence, 3),
@@ -700,7 +929,7 @@ def settlement_preview(conn, date_text, dimensions):
             "transfers": settlement_transfers(entries),
         }
 
-    actual_fields = legacy_fields(outfit)
+    actual_fields = known_fields(legacy_fields(outfit))
     guesses = conn.execute(
         """
         SELECT guesses.*, users.name FROM guesses
@@ -923,6 +1152,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return json_response(self, {"ok": True, "service": "what-to-wear"})
         if parsed.path == "/api/state":
             return self.get_state(parsed)
+        if parsed.path == "/api/config/export":
+            return self.get_config_export()
         self.send_error_json("接口不存在。", HTTPStatus.NOT_FOUND)
 
     def do_POST(self):
@@ -936,6 +1167,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 "/api/outfits": self.post_outfit,
                 "/api/settle": self.post_settle,
                 "/api/settings": self.post_settings,
+                "/api/ai/settings": self.post_ai_settings,
+                "/api/ai/odds/regenerate": self.post_ai_odds_regenerate,
+                "/api/config/import": self.post_config_import,
                 "/api/users": self.post_user,
                 "/api/dimensions": self.post_dimensions,
                 "/api/odds-preview": self.post_odds_preview,
@@ -1024,9 +1258,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     "settlements": [dict(row) for row in settlements],
                     "settlement_preview": settlement_preview(conn, date_text, dimensions),
                     "analytics": analytics(conn, dimensions),
+                    "ai_config": get_ai_config(conn),
+                    "ai_option_weights": get_ai_option_weights(conn),
+                    "ai_option_weights_updated_at": int(get_setting(conn, "ai_option_weights_updated_at", "0") or 0),
                     "model": {
                         "version": MODEL_VERSION,
-                        "summary": "人工初始可能性 + 实际着装历史的时间衰减贝叶斯更新；多维竞猜融合各维度后验概率和完整组合记录。",
+                        "summary": "人工初始可能性 + AI 选项概率 + 实际着装历史的时间衰减贝叶斯更新；多维竞猜融合各维度后验概率和完整组合记录。",
                     },
                     "empty_actual_fields": actual_fields,
                 },
@@ -1126,7 +1363,7 @@ class AppHandler(BaseHTTPRequestHandler):
         notes = str(data.get("notes", "")).strip()[:300]
         with db() as conn:
             dimensions = get_dimensions(conn)
-            fields = normalize_fields(data.get("fields") or legacy_request_fields(data), dimensions)
+            fields = normalize_fields(data.get("fields") or legacy_request_fields(data), dimensions, allow_unknown=True)
             conn.execute(
                 """
                 INSERT INTO outfit_records(date, color, style, vibe, fields_json, tags, notes, created_by, observed_at, created_at, updated_at)
@@ -1181,6 +1418,63 @@ class AppHandler(BaseHTTPRequestHandler):
         with db() as conn:
             set_setting(conn, "guess_deadline", deadline)
             json_response(self, {"ok": True})
+
+    def post_ai_settings(self):
+        user = self.require_admin()
+        if not user:
+            return
+        data = read_json(self)
+        with db() as conn:
+            config = save_ai_config(conn, data.get("ai_config") or data)
+            public = dict(config)
+            public.pop("api_key", None)
+            public["has_api_key"] = bool(config.get("api_key"))
+            json_response(self, {"ok": True, "ai_config": public})
+
+    def post_ai_odds_regenerate(self):
+        user = self.require_admin()
+        if not user:
+            return
+        data = read_json(self)
+        date_text = data.get("date") or today_iso()
+        with db() as conn:
+            dimensions = get_dimensions(conn)
+            weights = call_ai_for_option_weights(conn, date_text, dimensions)
+            json_response(self, {"ok": True, "ai_option_weights": weights, "updated_at": now_ts()})
+
+    def get_config_export(self):
+        user = self.require_admin()
+        if not user:
+            return
+        with db() as conn:
+            json_response(
+                self,
+                {"ok": True, "config": public_config_payload(conn)},
+                headers={"Content-Disposition": "attachment; filename=what-to-wear-config.json"},
+            )
+
+    def post_config_import(self):
+        user = self.require_admin()
+        if not user:
+            return
+        data = read_json(self)
+        config = data.get("config") if isinstance(data.get("config"), dict) else data
+        with db() as conn:
+            if "dimensions" in config:
+                dimensions = validate_dimensions(config.get("dimensions"))
+                set_setting(conn, "dimensions", json.dumps(dimensions, ensure_ascii=False))
+            if "deadline" in config:
+                deadline = str(config.get("deadline", "")).strip()
+                hour, minute = [int(part) for part in deadline.split(":", 1)]
+                dt.time(hour, minute)
+                set_setting(conn, "guess_deadline", deadline)
+            if "ai_config" in config:
+                save_ai_config(conn, config.get("ai_config"))
+            if "ai_option_weights" in config:
+                weights = normalize_ai_option_weights(config.get("ai_option_weights"), get_dimensions(conn))
+                set_setting(conn, "ai_option_weights", json.dumps(weights, ensure_ascii=False))
+                set_setting(conn, "ai_option_weights_updated_at", str(now_ts()))
+            json_response(self, {"ok": True, "config": public_config_payload(conn)})
 
     def post_dimensions(self):
         user = self.require_admin()
@@ -1297,6 +1591,7 @@ def analytics(conn, dimensions):
             actual_fields = json.loads(row["actual_fields"] or "{}")
         except json.JSONDecodeError:
             actual_fields = {}
+        actual_fields = known_fields(actual_fields)
         if not actual_fields:
             actual_fields = {"upper_color": row["actual_color"], "top_style": row["actual_style"]}
         item = by_user.setdefault(row["user_id"], {"name": row["name"], "hits": 0, "total": 0})

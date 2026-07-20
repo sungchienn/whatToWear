@@ -25,7 +25,10 @@ const COLOR_MAP = {
   "其他": "#9a9184",
   "不穿": "#f0c7ad",
   "下装失踪": "#f0c7ad",
+  "未知": "#d7d1c7",
 };
+
+const UNKNOWN_VALUE = "未知";
 
 function toast(message) {
   const node = $("#toast");
@@ -61,6 +64,12 @@ function optionHtml(items, selected = "") {
     const isSelected = item === selected ? "selected" : "";
     return `<option value="${escapeHtml(item)}" ${isSelected}>${escapeHtml(item)}</option>`;
   }).join("");
+}
+
+function actualOptions(dim) {
+  const options = [...(dim.options || [])];
+  if (!options.includes(UNKNOWN_VALUE)) options.push(UNKNOWN_VALUE);
+  return options;
 }
 
 function optionWeight(dim, option) {
@@ -157,6 +166,7 @@ function render() {
   renderSettlementPreview();
   renderBars();
   renderDimensionEditor();
+  renderAiSettings();
   updatePreview();
   updateOddsPreview();
 }
@@ -181,11 +191,12 @@ function renderGuessFields() {
 function renderActualFields() {
   const actualFields = state.data.actual?.fields || {};
   $("#actualFields").innerHTML = activeDimensions().map((dim) => {
-    const selected = actualFields[dim.key] || dim.options[0];
+    const options = actualOptions(dim);
+    const selected = actualFields[dim.key] || options[0];
     return `
       <label class="actual-field">
         ${escapeHtml(dim.name)}
-        <select class="actual-select" data-key="${escapeHtml(dim.key)}">${optionHtml(dim.options, selected)}</select>
+        <select class="actual-select" data-key="${escapeHtml(dim.key)}">${optionHtml(options, selected)}</select>
       </label>
     `;
   }).join("");
@@ -464,6 +475,16 @@ function renderDimensionEditor() {
   `).join("");
 }
 
+function renderAiSettings() {
+  const config = state.data.ai_config || {};
+  $("#aiEnabled").checked = Boolean(config.enabled);
+  $("#aiWeightInput").value = Math.round(Number(config.ai_weight || 0) * 100);
+  $("#aiModelInput").value = config.model || "";
+  $("#aiEndpointInput").value = config.endpoint || "";
+  $("#aiWeatherInput").value = config.weather || "";
+  $("#aiKeyInput").placeholder = config.has_api_key ? "已保存，留空不修改" : "请输入 API Key";
+}
+
 function collectDimensionsFromEditor() {
   return $$(".dimension-row").map((row, index) => ({
     key: row.querySelector(".dimension-key").value.trim(),
@@ -473,6 +494,27 @@ function collectDimensionsFromEditor() {
     order: Number(row.querySelector(".dimension-order").value || index),
     options: row.querySelector(".dimension-options").value.split("\n").map((item) => parseOptionLine(item.trim())).filter((item) => item.label),
   }));
+}
+
+function downloadJson(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(file);
+  });
 }
 
 function bindEvents() {
@@ -584,6 +626,72 @@ function bindEvents() {
       await loadState();
     } catch (err) {
       toast(err.message);
+    }
+  });
+
+  $("#aiSettingsForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const apiKey = $("#aiKeyInput").value.trim();
+      const aiConfig = {
+        enabled: $("#aiEnabled").checked,
+        ai_weight: Number($("#aiWeightInput").value || 0) / 100,
+        model: $("#aiModelInput").value.trim(),
+        endpoint: $("#aiEndpointInput").value.trim(),
+        weather: $("#aiWeatherInput").value.trim(),
+      };
+      if (apiKey) aiConfig.api_key = apiKey;
+      await api("/api/ai/settings", {
+        method: "POST",
+        body: JSON.stringify({ ai_config: aiConfig }),
+      });
+      $("#aiKeyInput").value = "";
+      toast("AI 设置已保存");
+      await loadState();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  $("#refreshAiOddsBtn").addEventListener("click", async () => {
+    try {
+      toast("正在调用 AI 计算赔率");
+      await api("/api/ai/odds/regenerate", {
+        method: "POST",
+        body: JSON.stringify({ date: state.selectedDate }),
+      });
+      toast("AI 赔率已更新");
+      await loadState();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  $("#exportConfigBtn").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/config/export");
+      downloadJson(`what-to-wear-config-${state.selectedDate}.json`, data.config);
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  $("#importConfigInput").addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await readFileAsText(file);
+      const config = JSON.parse(text);
+      await api("/api/config/import", {
+        method: "POST",
+        body: JSON.stringify({ config }),
+      });
+      toast("配置已导入");
+      await loadState();
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      event.target.value = "";
     }
   });
 
