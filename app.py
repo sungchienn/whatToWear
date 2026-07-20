@@ -24,8 +24,22 @@ PORT = int(os.environ.get("PORT", "8008"))
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-change-this-secret")
 USER_INVITE_CODE = os.environ.get("USER_INVITE_CODE", "wear2026")
 ADMIN_INVITE_CODE = os.environ.get("ADMIN_INVITE_CODE", "admin2026")
-MODEL_VERSION = "field-pool-bayes-v2"
+MODEL_VERSION = "weighted-prior-bayes-v3"
 ODDS_CAP = 50.0
+
+DEFAULT_OPTION_WEIGHTS = {
+    "hair_style": {"短发": 0.26, "长发": 0.22, "马尾": 0.18, "卷发": 0.12, "丸子头": 0.08, "帽子压住看不清": 0.06, "今天头发很有想法": 0.08},
+    "upper_color": {"黑色": 0.28, "白色": 0.18, "灰色": 0.14, "蓝色": 0.11, "绿色": 0.06, "红色": 0.04, "粉色": 0.05, "黄色": 0.03, "卡其": 0.06, "紫色": 0.02, "其他": 0.025, "不穿": 0.005},
+    "top_style": {"T恤": 0.30, "衬衫": 0.20, "卫衣": 0.14, "针织衫": 0.10, "西装": 0.07, "马甲": 0.04, "背心": 0.05, "不穿上衣": 0.005, "披了个谜": 0.095},
+    "outerwear": {"无外套": 0.55, "有外套": 0.34, "抱在手上": 0.08, "披着但不承认": 0.03},
+    "outerwear_color": {"黑色": 0.26, "白色": 0.10, "灰色": 0.18, "蓝色": 0.10, "绿色": 0.06, "红色": 0.04, "卡其": 0.12, "透明外套": 0.005, "其他": 0.135},
+    "lower_color": {"黑色": 0.32, "白色": 0.07, "灰色": 0.12, "蓝色": 0.22, "卡其": 0.12, "棕色": 0.05, "粉色": 0.02, "其他": 0.075, "下装失踪": 0.005},
+    "lower_style": {"长裤": 0.28, "牛仔裤": 0.24, "运动裤": 0.14, "短裤": 0.09, "半身裙": 0.10, "连衣裙": 0.08, "下装失踪风": 0.06, "不穿": 0.01},
+    "legwear": {"无明显袜类": 0.45, "短袜": 0.22, "长袜": 0.13, "丝袜": 0.09, "看不出来": 0.08, "袜子很抢戏": 0.03},
+    "shoes_color": {"黑色": 0.30, "白色": 0.26, "灰色": 0.13, "棕色": 0.08, "蓝色": 0.06, "红色": 0.03, "其他": 0.12, "拖鞋气质": 0.02},
+    "shoes_style": {"运动鞋": 0.38, "皮鞋": 0.13, "靴子": 0.08, "帆布鞋": 0.18, "凉鞋": 0.08, "拖鞋": 0.03, "看不清": 0.12},
+    "vibe": {"休闲": 0.35, "通勤": 0.25, "运动": 0.10, "正式": 0.08, "甜酷": 0.07, "简约": 0.08, "保暖": 0.04, "今天是随机皮肤": 0.03},
+}
 
 
 DEFAULT_DIMENSIONS = [
@@ -275,15 +289,25 @@ def validate_dimensions(raw_dims, forgiving=False):
         if not key or key in seen or not name:
             continue
         options = raw.get("options") or []
+        raw_weights = raw.get("option_weights") or raw.get("probabilities") or {}
         if isinstance(options, str):
             options = [part.strip() for part in options.splitlines()]
         clean_options = []
+        clean_weights = {}
         for option in options:
-            option = str(option).strip()[:30]
-            if option and option not in clean_options:
-                clean_options.append(option)
+            label, probability = parse_option_config(option)
+            label = label[:30]
+            if label and label not in clean_options:
+                clean_options.append(label)
+                weight = probability
+                if weight is None and isinstance(raw_weights, dict):
+                    weight = raw_weights.get(label)
+                if weight is None:
+                    weight = DEFAULT_OPTION_WEIGHTS.get(key, {}).get(label)
+                clean_weights[label] = parse_probability(weight)
         if len(clean_options) < 2:
             continue
+        clean_weights = normalize_option_weights(clean_options, clean_weights)
         seen.add(key)
         dims.append(
             {
@@ -292,6 +316,8 @@ def validate_dimensions(raw_dims, forgiving=False):
                 "active": bool(raw.get("active", True)),
                 "visual_part": str(raw.get("visual_part") or key).strip()[:40],
                 "options": clean_options[:40],
+                "option_weights": {option: clean_weights[option] for option in clean_options[:40]},
+                "prior_strength": float(raw.get("prior_strength", 4.0) or 4.0),
                 "order": int(raw.get("order", index)),
             }
         )
@@ -301,6 +327,39 @@ def validate_dimensions(raw_dims, forgiving=False):
             return DEFAULT_DIMENSIONS
         raise ValueError("至少保留一个包含两个以上选项的维度。")
     return dims[:30]
+
+
+def parse_option_config(option):
+    if isinstance(option, dict):
+        label = str(option.get("label") or option.get("name") or option.get("value") or "").strip()
+        probability = option.get("probability", option.get("weight"))
+        return label, parse_probability(probability)
+    text = str(option).strip()
+    if "|" in text:
+        label, probability = text.rsplit("|", 1)
+        return label.strip(), parse_probability(probability)
+    return text, None
+
+
+def parse_probability(value):
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    if number > 1:
+        number = number / 100.0
+    return number
+
+
+def normalize_option_weights(options, weights):
+    fallback = 1.0 / max(1, len(options))
+    values = {option: weights.get(option) or fallback for option in options}
+    total = sum(values.values()) or 1.0
+    return {option: round(values[option] / total, 6) for option in options}
 
 
 def active_dimensions(dimensions):
@@ -373,9 +432,48 @@ def selected_pool_size(fields, dimensions):
     return max(1, size)
 
 
+def option_probability(dim, value):
+    weights = dim.get("option_weights") or {}
+    if value in weights:
+        return max(0.0001, float(weights[value]))
+    return 1.0 / max(1, len(dim.get("options") or []))
+
+
+def fields_prior_probability(fields, dimensions):
+    dims = dimension_map(dimensions)
+    probability = 1.0
+    for key, value in fields.items():
+        if key in dims:
+            probability *= option_probability(dims[key], value)
+    return max(0.000001, probability)
+
+
+def dimension_posterior_probability(rows, target_date, dim, value):
+    total_weight = 0.0
+    match_weight = 0.0
+    for row in rows:
+        record_fields = legacy_fields(row)
+        if dim["key"] not in record_fields:
+            continue
+        days = max(0, (target_date - parse_date(row["date"])).days)
+        weight = 0.93 ** days
+        total_weight += weight
+        if record_fields.get(dim["key"]) == value:
+            match_weight += weight
+    prior = option_probability(dim, value)
+    prior_strength = max(0.5, min(20.0, float(dim.get("prior_strength", 4.0) or 4.0)))
+    return {
+        "probability": (match_weight + prior_strength * prior) / (total_weight + prior_strength),
+        "sample_weight": total_weight,
+        "match_weight": match_weight,
+        "prior_probability": prior,
+    }
+
+
 def odds_for_fields(conn, date_text, fields, dimensions):
     fields = normalize_fields(fields, dimensions)
     pool_size = selected_pool_size(fields, dimensions)
+    prior_probability = fields_prior_probability(fields, dimensions)
     target_date = parse_date(date_text)
     rows = conn.execute(
         "SELECT * FROM outfit_records WHERE date < ? ORDER BY date ASC",
@@ -384,25 +482,43 @@ def odds_for_fields(conn, date_text, fields, dimensions):
 
     total_weight = 0.0
     match_weight = 0.0
+    independent_probability = 1.0
+    field_stats = []
+    dims = dimension_map(dimensions)
+    for key, value in fields.items():
+        if key not in dims:
+            continue
+        stat = dimension_posterior_probability(rows, target_date, dims[key], value)
+        independent_probability *= stat["probability"]
+        field_stats.append({"key": key, "value": value, **{k: round(v, 5) for k, v in stat.items()}})
+
     for row in rows:
         record_fields = legacy_fields(row)
+        if not all(key in record_fields for key in fields):
+            continue
         days = max(0, (target_date - parse_date(row["date"])).days)
         weight = 0.93 ** days
         total_weight += weight
         if all(record_fields.get(key) == value for key, value in fields.items()):
             match_weight += weight
 
-    prior_probability = 1.0 / pool_size
-    prior_strength = 1.0
-    probability = (match_weight + prior_strength * prior_probability) / (total_weight + prior_strength)
+    combo_prior_strength = 0.8
+    combo_probability = (match_weight + combo_prior_strength * prior_probability) / (total_weight + combo_prior_strength)
+    combo_confidence = 0.0 if len(fields) == 1 else min(0.70, total_weight / (total_weight + 2.0))
+    probability = (1.0 - combo_confidence) * independent_probability + combo_confidence * combo_probability
     probability = max(0.001, min(0.98, probability))
     odds_weight = min(ODDS_CAP, max(1.05, 1.0 / probability))
     return {
         "probability": round(probability, 5),
         "odds_weight": round(odds_weight, 2),
         "pool_size": pool_size,
+        "prior_probability": round(prior_probability, 5),
+        "independent_probability": round(independent_probability, 5),
+        "combo_probability": round(combo_probability, 5),
+        "combo_confidence": round(combo_confidence, 3),
         "sample_weight": round(total_weight, 2),
         "match_weight": round(match_weight, 2),
+        "field_stats": field_stats,
         "model_version": MODEL_VERSION,
     }
 
@@ -714,7 +830,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "analytics": analytics(conn, dimensions),
                     "model": {
                         "version": MODEL_VERSION,
-                        "summary": "按已选择维度组成竞猜池，使用历史加权命中率 + 池子大小贝叶斯先验计算赔率。",
+                        "summary": "人工初始可能性 + 实际着装历史的时间衰减贝叶斯更新；多维竞猜融合各维度后验概率和完整组合记录。",
                     },
                     "empty_actual_fields": actual_fields,
                 },

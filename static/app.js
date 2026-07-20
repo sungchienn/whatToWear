@@ -63,6 +63,23 @@ function optionHtml(items, selected = "") {
   }).join("");
 }
 
+function optionWeight(dim, option) {
+  const weights = dim.option_weights || {};
+  if (typeof weights[option] === "number") return weights[option];
+  return 1 / Math.max(1, (dim.options || []).length);
+}
+
+function optionLine(dim, option) {
+  return `${option} | ${(optionWeight(dim, option) * 100).toFixed(1)}`;
+}
+
+function parseOptionLine(line) {
+  const [labelPart, probabilityPart] = line.split("|");
+  const label = (labelPart || "").trim();
+  const probability = Number((probabilityPart || "").trim());
+  return probability > 0 ? { label, probability } : { label };
+}
+
 function formatTs(seconds) {
   if (!seconds) return "";
   return new Date(seconds * 1000).toLocaleString("zh-CN", {
@@ -207,6 +224,7 @@ function renderRecommendations() {
     <div class="odds-card">
       <strong>${escapeHtml(item.labels.map((label) => label.value).join(" / "))}</strong>
       <small>池子 ${item.pool_size}，概率 ${(item.probability * 100).toFixed(1)}%</small>
+      <small>初始 ${(item.prior_probability * 100).toFixed(1)}%</small>
       <span>${Number(item.odds_weight).toFixed(2)}x</span>
     </div>
   `).join("");
@@ -303,7 +321,7 @@ function updateOddsPreview() {
       });
       $("#guessOdds").textContent = `${Number(result.odds_weight).toFixed(2)}x`;
       $("#guessProb").textContent = `预测概率 ${(Number(result.probability) * 100).toFixed(1)}%`;
-      $("#poolInfo").textContent = `竞猜池 ${result.pool_size} 种，历史样本权重 ${result.sample_weight}`;
+      $("#poolInfo").textContent = `初始 ${(result.prior_probability * 100).toFixed(1)}%，样本 ${result.sample_weight}，组合置信 ${Math.round(result.combo_confidence * 100)}%`;
     } catch (err) {
       $("#guessOdds").textContent = "--";
       $("#guessProb").textContent = err.message;
@@ -368,8 +386,8 @@ function renderDimensionEditor() {
           <input class="dimension-order" type="number" value="${Number(dim.order || index)}" />
         </label>
         <label class="wide">
-          选项，每行一个
-          <textarea class="dimension-options">${escapeHtml((dim.options || []).join("\n"))}</textarea>
+          选项与初始可能性，每行一个，格式：选项 | 百分比
+          <textarea class="dimension-options">${escapeHtml((dim.options || []).map((option) => optionLine(dim, option)).join("\n"))}</textarea>
         </label>
       </div>
     </div>
@@ -383,7 +401,7 @@ function collectDimensionsFromEditor() {
     active: row.querySelector(".dimension-active").checked,
     visual_part: row.querySelector(".dimension-part").value.trim(),
     order: Number(row.querySelector(".dimension-order").value || index),
-    options: row.querySelector(".dimension-options").value.split("\n").map((item) => item.trim()).filter(Boolean),
+    options: row.querySelector(".dimension-options").value.split("\n").map((item) => parseOptionLine(item.trim())).filter((item) => item.label),
   }));
 }
 
