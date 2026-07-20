@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>今天穿什么</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div id="toast" class="toast" role="status"></div>
+
+    <main id="loginView" class="login-shell hidden">
+      <section class="login-panel">
+        <div class="brand-mark">WTW</div>
+        <h1>今天穿什么</h1>
+        <p>记录竞猜、动态赔率和奶茶积分。</p>
+        <div class="segmented" role="tablist">
+          <button class="segment active" data-auth-mode="login">登录</button>
+          <button class="segment" data-auth-mode="register">注册</button>
+        </div>
+        <form id="authForm" class="form-grid">
+          <label>
+            昵称
+            <input id="authName" autocomplete="username" maxlength="24" required />
+          </label>
+          <label>
+            PIN
+            <input id="authPin" type="password" autocomplete="current-password" minlength="4" required />
+          </label>
+          <label id="inviteRow" class="hidden">
+            邀请码
+            <input id="authInvite" autocomplete="off" />
+          </label>
+          <button class="primary-action" type="submit">继续</button>
+        </form>
+      </section>
+    </main>
+
+    <main id="appView" class="app-shell hidden">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Milk Tea Odds</p>
+          <h1>今天穿什么</h1>
+        </div>
+        <div class="top-actions">
+          <input id="datePicker" type="date" />
+          <button id="logoutBtn" class="icon-btn" title="退出">退出</button>
+        </div>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="today">竞猜</button>
+        <button class="tab" data-tab="odds">赔率</button>
+        <button class="tab" data-tab="record">记录</button>
+        <button class="tab" data-tab="rank">积分</button>
+      </nav>
+
+      <section class="status-grid">
+        <article>
+          <span>截止时间</span>
+          <strong id="deadlineText">--</strong>
+        </article>
+        <article>
+          <span>今日状态</span>
+          <strong id="lockText">--</strong>
+        </article>
+        <article>
+          <span>参与人数</span>
+          <strong id="guessCount">0</strong>
+        </article>
+      </section>
+
+      <section class="tab-panel" data-panel="today">
+        <div class="layout two-col">
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>提交竞猜</h2>
+              <span id="userBadge"></span>
+            </div>
+            <form id="guessForm" class="form-grid">
+              <label>
+                颜色
+                <select id="guessColor"></select>
+              </label>
+              <label>
+                款式
+                <select id="guessStyle"></select>
+              </label>
+              <div class="odds-preview">
+                <span>当前赔率</span>
+                <strong id="guessOdds">--</strong>
+                <small id="guessProb">--</small>
+              </div>
+              <button class="primary-action" type="submit">提交或更新</button>
+            </form>
+          </article>
+
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>提交情况</h2>
+              <span id="actualBadge">未记录</span>
+            </div>
+            <div id="guessList" class="list compact-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" data-panel="odds">
+        <div class="layout">
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>推荐赔率</h2>
+              <button id="regenOddsBtn" class="secondary-action admin-only">重算</button>
+            </div>
+            <div id="topOdds" class="odds-grid"></div>
+          </article>
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>模型参考</h2>
+              <span id="modelVersion"></span>
+            </div>
+            <p id="modelSummary" class="muted"></p>
+            <div class="bars" id="colorBars"></div>
+            <div class="bars" id="styleBars"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" data-panel="record">
+        <div class="layout two-col">
+          <article class="tool-panel admin-only">
+            <div class="section-title">
+              <h2>实际着装</h2>
+              <button id="settleBtn" class="secondary-action">结算</button>
+            </div>
+            <form id="outfitForm" class="form-grid">
+              <label>
+                颜色
+                <select id="actualColor"></select>
+              </label>
+              <label>
+                款式
+                <select id="actualStyle"></select>
+              </label>
+              <label>
+                风格
+                <select id="actualVibe"></select>
+              </label>
+              <label>
+                标签
+                <input id="actualTags" placeholder="如：外套、深色、会议日" maxlength="120" />
+              </label>
+              <label class="wide">
+                备注
+                <textarea id="actualNotes" maxlength="300"></textarea>
+              </label>
+              <button class="primary-action" type="submit">保存记录</button>
+            </form>
+          </article>
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>历史着装</h2>
+              <span id="historyCount">0 条</span>
+            </div>
+            <div id="historyList" class="list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" data-panel="rank">
+        <div class="layout two-col">
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>奶茶积分</h2>
+              <span>1 分 = 1 份筹码</span>
+            </div>
+            <div id="leaderboard" class="list"></div>
+          </article>
+          <article class="tool-panel">
+            <div class="section-title">
+              <h2>结算记录</h2>
+            </div>
+            <div id="settlementList" class="list compact-list"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
