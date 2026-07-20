@@ -406,7 +406,8 @@ def json_response(handler, payload, status=200, headers=None):
     for key, value in (headers or {}).items():
         handler.send_header(key, value)
     handler.end_headers()
-    handler.wfile.write(body)
+    if handler.command != "HEAD":
+        handler.wfile.write(body)
 
 
 def read_json(handler):
@@ -426,7 +427,8 @@ def static_response(handler, path, content_type):
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
-    handler.wfile.write(data)
+    if handler.command != "HEAD":
+        handler.wfile.write(data)
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -455,6 +457,12 @@ class AppHandler(BaseHTTPRequestHandler):
         return user
 
     def do_GET(self):
+        return self.route_read()
+
+    def do_HEAD(self):
+        return self.route_read()
+
+    def route_read(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return static_response(self, BASE_DIR / "templates" / "index.html", "text/html; charset=utf-8")
