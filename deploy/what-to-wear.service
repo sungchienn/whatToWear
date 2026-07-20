@@ -1,0 +1,19 @@
+[Unit]
+Description=WhatToWear web service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/whatToWear
+Environment=HOST=0.0.0.0
+Environment=PORT=8008
+Environment=WHAT_TO_WEAR_DB=/opt/whatToWear/data/what_to_wear.sqlite3
+Environment=USER_INVITE_CODE=wear2026
+Environment=ADMIN_INVITE_CODE=admin2026
+Environment=SECRET_KEY=please-change-this-secret
+ExecStart=/usr/bin/python3 /opt/whatToWear/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
