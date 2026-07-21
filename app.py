@@ -294,7 +294,10 @@ def default_ai_config():
         "provider": "openai-compatible",
         "endpoint": "https://api.openai.com/v1/chat/completions",
         "model": "gpt-4.1-mini",
-        "ai_weight": 0.5,
+        "manual_weight": 0.4,
+        "ai_weight": 0.4,
+        "history_weight": 0.2,
+        "weather_location": "上海",
         "weather": "",
     }
 
@@ -313,14 +316,13 @@ def get_ai_config(conn, include_secret=False):
     raw = get_json_setting(conn, "ai_odds_config", {})
     if isinstance(raw, dict):
         config.update(raw)
+        apply_legacy_weight_defaults(config, raw)
     config["enabled"] = bool(config.get("enabled"))
     config["endpoint"] = str(config.get("endpoint") or default_ai_config()["endpoint"]).strip()
     config["model"] = str(config.get("model") or default_ai_config()["model"]).strip()
+    config["weather_location"] = str(config.get("weather_location") or "上海").strip()[:80]
     config["weather"] = str(config.get("weather") or "").strip()[:500]
-    try:
-        config["ai_weight"] = max(0.0, min(1.0, float(config.get("ai_weight", 0.5))))
-    except (TypeError, ValueError):
-        config["ai_weight"] = 0.5
+    config.update(normalized_source_weights(config))
     if not include_secret:
         config.pop("api_key", None)
         config["has_api_key"] = bool(raw.get("api_key")) if isinstance(raw, dict) else False
@@ -332,11 +334,12 @@ def save_ai_config(conn, incoming):
     incoming = incoming or {}
     if not isinstance(incoming, dict):
         raise ValueError("AI 配置格式不正确。")
-    for key in ["enabled", "endpoint", "model", "weather"]:
+    for key in ["enabled", "endpoint", "model", "weather", "weather_location"]:
         if key in incoming:
             current[key] = incoming[key]
-    if "ai_weight" in incoming:
-        current["ai_weight"] = incoming["ai_weight"]
+    for key in ["manual_weight", "ai_weight", "history_weight"]:
+        if key in incoming:
+            current[key] = incoming[key]
     if "api_key" in incoming and str(incoming.get("api_key") or "").strip():
         current["api_key"] = str(incoming.get("api_key")).strip()
     cleaned = get_ai_config_from_raw(current, include_secret=True)
@@ -348,22 +351,77 @@ def get_ai_config_from_raw(raw, include_secret=False):
     config = default_ai_config()
     if isinstance(raw, dict):
         config.update(raw)
+        apply_legacy_weight_defaults(config, raw)
     config["enabled"] = bool(config.get("enabled"))
     config["endpoint"] = str(config.get("endpoint") or default_ai_config()["endpoint"]).strip()[:300]
     config["model"] = str(config.get("model") or default_ai_config()["model"]).strip()[:120]
+    config["weather_location"] = str(config.get("weather_location") or "上海").strip()[:80]
     config["weather"] = str(config.get("weather") or "").strip()[:500]
-    try:
-        config["ai_weight"] = max(0.0, min(1.0, float(config.get("ai_weight", 0.5))))
-    except (TypeError, ValueError):
-        config["ai_weight"] = 0.5
+    config.update(normalized_source_weights(config))
     if include_secret and raw.get("api_key"):
         config["api_key"] = str(raw.get("api_key")).strip()
     return config
 
 
+def apply_legacy_weight_defaults(config, raw):
+    if "manual_weight" not in raw or "history_weight" not in raw:
+        try:
+            ai = max(0.0, min(1.0, float(config.get("ai_weight", 0.4))))
+        except (TypeError, ValueError):
+            ai = 0.4
+        history = 0.2
+        manual = max(0.0, 1.0 - ai - history)
+        config["manual_weight"] = manual
+        config["ai_weight"] = ai
+        config["history_weight"] = history
+
+
+def normalized_source_weights(config):
+    def clean(key, default):
+        try:
+            return max(0.0, float(config.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    manual = clean("manual_weight", 0.4)
+    ai = clean("ai_weight", 0.4)
+    history = clean("history_weight", 0.2)
+    total = manual + ai + history
+    if total <= 0:
+        manual, ai, history, total = 0.4, 0.4, 0.2, 1.0
+    return {
+        "manual_weight": round(manual / total, 4),
+        "ai_weight": round(ai / total, 4),
+        "history_weight": round(history / total, 4),
+    }
+
+
 def get_ai_option_weights(conn):
     raw = get_json_setting(conn, "ai_option_weights", {})
     return raw if isinstance(raw, dict) else {}
+
+
+def get_reopened_dates(conn):
+    raw = get_json_setting(conn, "reopened_dates", [])
+    return set(raw) if isinstance(raw, list) else set()
+
+
+def set_reopened_dates(conn, dates):
+    clean = sorted({str(date) for date in dates if str(date).strip()})
+    set_setting(conn, "reopened_dates", json.dumps(clean, ensure_ascii=False))
+
+
+def reopen_date(conn, date_text):
+    dates = get_reopened_dates(conn)
+    dates.add(date_text)
+    set_reopened_dates(conn, dates)
+
+
+def close_reopened_date(conn, date_text):
+    dates = get_reopened_dates(conn)
+    if date_text in dates:
+        dates.remove(date_text)
+        set_reopened_dates(conn, dates)
 
 
 def public_config_payload(conn):
@@ -374,6 +432,7 @@ def public_config_payload(conn):
         "dimensions": get_dimensions(conn),
         "ai_config": get_ai_config(conn),
         "ai_option_weights": get_ai_option_weights(conn),
+        "reopened_dates": sorted(get_reopened_dates(conn)),
     }
 
 
@@ -464,6 +523,7 @@ def call_ai_for_option_weights(conn, date_text, dimensions):
     payload = ai_training_payload(conn, date_text, dimensions)
     user_content = {
         **payload,
+        "weather_location": config.get("weather_location", ""),
         "weather_forecast": config.get("weather", ""),
         "output_schema": {
             "dimension_key": {"option_label": "probability number, 0-1 or percent"},
@@ -472,7 +532,9 @@ def call_ai_for_option_weights(conn, date_text, dimensions):
             "manual_option_weights 表示人工维护的衣柜/常见情况基础占比，是重要先验，不是历史命中占比。",
             "不要因为前一天穿了某个高占比选项就机械降低它；如果人工占比很高，例如黑色衣服很多，目标日仍可能继续是黑色。",
             "previous_day_outfit 是目标日前一天的人工记录着装，用于判断连续穿着、换洗、外套/鞋子延续等转移效应。",
-            "weather_forecast 是目标日期当地天气预报或人工补充信息，应影响外套、鞋子、袜类、保暖/运动/正式等维度。",
+            "weather_location 是要参考天气的地区；如果模型或运行环境支持联网/检索，请自行查询该地区目标日期天气预报并参考。",
+            "weather_forecast 是管理员手工补充的天气或上下文；如为空，应优先根据 weather_location 和 target_date 推断/查询天气。",
+            "天气应影响外套、鞋子、袜类、保暖/运动/正式等维度。",
             "history 用于估计个人习惯和周期性，但未知字段只说明当天没记录清楚，不要当成可预测选项。",
         ],
     }
@@ -490,6 +552,7 @@ def call_ai_for_option_weights(conn, date_text, dimensions):
                     "综合三类证据：1. manual_option_weights，代表衣柜/常见情况基础占比；"
                     "2. previous_day_outfit，代表目标日前一天的实际记录和转移效应；"
                     "3. weather_forecast 与 history，代表天气和长期习惯。"
+                    "如果可以联网或模型具备天气知识，请根据 weather_location 和 target_date 查询/推断天气。"
                     "高人工占比选项允许连续出现，不要简单套用“昨天穿过今天不穿”的规则。"
                 ),
             },
@@ -715,7 +778,8 @@ def fields_prior_probability(fields, dimensions, ai_option_weights=None, ai_weig
     return max(0.000001, probability)
 
 
-def dimension_posterior_probability(rows, target_date, dim, value, ai_option_weights=None, ai_weight=0.0):
+def dimension_posterior_probability(rows, target_date, dim, value, ai_option_weights=None, source_weights=None):
+    source_weights = source_weights or normalized_source_weights({})
     total_weight = 0.0
     match_weight = 0.0
     for row in rows:
@@ -729,15 +793,25 @@ def dimension_posterior_probability(rows, target_date, dim, value, ai_option_wei
             match_weight += weight
     manual_prior = option_probability(dim, value)
     ai_prior = option_probability(dim, value, ai_option_weights, 1.0) if ai_option_weights else manual_prior
-    prior = option_probability(dim, value, ai_option_weights, ai_weight)
+    fallback_prior = manual_prior * source_weights["manual_weight"] + ai_prior * source_weights["ai_weight"]
+    fallback_total = source_weights["manual_weight"] + source_weights["ai_weight"]
+    if fallback_total > 0:
+        fallback_prior = fallback_prior / fallback_total
     prior_strength = max(0.5, min(20.0, float(dim.get("prior_strength", 4.0) or 4.0)))
+    historical_probability = (match_weight + prior_strength * fallback_prior) / (total_weight + prior_strength)
+    prior = (
+        manual_prior * source_weights["manual_weight"]
+        + ai_prior * source_weights["ai_weight"]
+        + historical_probability * source_weights["history_weight"]
+    )
     return {
-        "probability": (match_weight + prior_strength * prior) / (total_weight + prior_strength),
+        "probability": prior,
         "sample_weight": total_weight,
         "match_weight": match_weight,
         "prior_probability": prior,
         "manual_prior_probability": manual_prior,
         "ai_prior_probability": ai_prior,
+        "history_probability": historical_probability,
     }
 
 
@@ -745,9 +819,11 @@ def odds_for_fields(conn, date_text, fields, dimensions):
     fields = normalize_fields(fields, dimensions)
     pool_size = selected_pool_size(fields, dimensions)
     ai_config = get_ai_config(conn)
-    ai_weight = ai_config["ai_weight"] if ai_config.get("enabled") else 0.0
-    ai_option_weights = get_ai_option_weights(conn) if ai_weight > 0 else {}
-    prior_probability = fields_prior_probability(fields, dimensions, ai_option_weights, ai_weight)
+    source_weights = normalized_source_weights(ai_config)
+    if not ai_config.get("enabled"):
+        source_weights["manual_weight"] += source_weights["ai_weight"]
+        source_weights["ai_weight"] = 0.0
+    ai_option_weights = get_ai_option_weights(conn) if source_weights["ai_weight"] > 0 else {}
     manual_prior_probability = fields_prior_probability(fields, dimensions)
     ai_prior_probability = fields_prior_probability(fields, dimensions, ai_option_weights, 1.0) if ai_option_weights else manual_prior_probability
     target_date = parse_date(date_text)
@@ -764,9 +840,11 @@ def odds_for_fields(conn, date_text, fields, dimensions):
     for key, value in fields.items():
         if key not in dims:
             continue
-        stat = dimension_posterior_probability(rows, target_date, dims[key], value, ai_option_weights, ai_weight)
+        stat = dimension_posterior_probability(rows, target_date, dims[key], value, ai_option_weights, source_weights)
         independent_probability *= stat["probability"]
         field_stats.append({"key": key, "value": value, **{k: round(v, 5) for k, v in stat.items()}})
+
+    prior_probability = independent_probability
 
     for row in rows:
         record_fields = known_fields(legacy_fields(row))
@@ -779,8 +857,9 @@ def odds_for_fields(conn, date_text, fields, dimensions):
             match_weight += weight
 
     combo_prior_strength = 0.8
-    combo_probability = (match_weight + combo_prior_strength * prior_probability) / (total_weight + combo_prior_strength)
-    combo_confidence = 0.0 if len(fields) == 1 else min(0.70, total_weight / (total_weight + 2.0))
+    combo_history_probability = (match_weight + combo_prior_strength * prior_probability) / (total_weight + combo_prior_strength)
+    combo_confidence = 0.0 if len(fields) == 1 else min(0.70 * source_weights["history_weight"], total_weight / (total_weight + 2.0))
+    combo_probability = combo_history_probability
     probability = (1.0 - combo_confidence) * independent_probability + combo_confidence * combo_probability
     probability = max(0.001, min(0.98, probability))
     odds_weight = min(ODDS_CAP, max(1.05, 1.0 / probability))
@@ -791,7 +870,9 @@ def odds_for_fields(conn, date_text, fields, dimensions):
         "prior_probability": round(prior_probability, 5),
         "manual_prior_probability": round(manual_prior_probability, 5),
         "ai_prior_probability": round(ai_prior_probability, 5),
-        "ai_blend_weight": round(ai_weight, 3),
+        "ai_blend_weight": round(source_weights["ai_weight"], 3),
+        "manual_blend_weight": round(source_weights["manual_weight"], 3),
+        "history_blend_weight": round(source_weights["history_weight"], 3),
         "independent_probability": round(independent_probability, 5),
         "combo_probability": round(combo_probability, 5),
         "combo_confidence": round(combo_confidence, 3),
@@ -846,6 +927,8 @@ def get_current_user(handler):
 def is_locked(conn, date_text):
     if conn.execute("SELECT 1 FROM outfit_records WHERE date = ?", (date_text,)).fetchone():
         return True
+    if date_text in get_reopened_dates(conn):
+        return False
     deadline = get_setting(conn, "guess_deadline", "10:00")
     selected = parse_date(date_text)
     if selected < dt.date.today():
@@ -1260,6 +1343,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "/api/logout": self.post_logout,
                 "/api/guesses": self.post_guess,
                 "/api/outfits": self.post_outfit,
+                "/api/outfits/delete": self.post_outfit_delete,
                 "/api/settle": self.post_settle,
                 "/api/settings": self.post_settings,
                 "/api/ai/settings": self.post_ai_settings,
@@ -1343,6 +1427,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "today": today_iso(),
                     "user": public_user(user),
                     "is_locked": locked,
+                    "is_reopened": date_text in get_reopened_dates(conn),
                     "deadline": deadline,
                     "dimensions": dimensions,
                     "recommendations": build_recommendations(conn, date_text, dimensions),
@@ -1487,7 +1572,29 @@ class AppHandler(BaseHTTPRequestHandler):
                     now_ts(),
                 ),
             )
+            close_reopened_date(conn, date_text)
             json_response(self, {"ok": True, "fields": fields})
+
+    def post_outfit_delete(self):
+        user = self.require_admin()
+        if not user:
+            return
+        data = read_json(self)
+        date_text = data.get("date") or today_iso()
+        with db() as conn:
+            outfit_deleted = conn.execute("DELETE FROM outfit_records WHERE date = ?", (date_text,)).rowcount
+            settlement_deleted = conn.execute("DELETE FROM settlements WHERE date = ?", (date_text,)).rowcount
+            reopen_date(conn, date_text)
+            json_response(
+                self,
+                {
+                    "ok": True,
+                    "date": date_text,
+                    "outfit_deleted": outfit_deleted,
+                    "settlement_deleted": settlement_deleted,
+                    "reopened": True,
+                },
+            )
 
     def post_settle(self):
         user = self.require_admin()

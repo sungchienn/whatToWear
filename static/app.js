@@ -158,6 +158,7 @@ function render() {
   $("#deadlineText").textContent = data.deadline;
   $("#deadlineInput").value = data.deadline;
   $("#lockText").textContent = data.is_locked ? "已锁定" : "可提交";
+  if (data.is_reopened) $("#lockText").textContent = "已开放下注";
   $("#guessCount").textContent = data.guesses.length;
   $("#userBadge").textContent = `${data.user.name}${data.user.is_admin ? " · 管理员" : ""}`;
   $("#actualBadge").textContent = data.actual ? data.actual.summary : "未记录";
@@ -278,7 +279,7 @@ function renderAiOdds() {
   const updatedAt = state.data.ai_option_weights_updated_at;
   const config = state.data.ai_config || {};
   $("#aiPredictionMeta").textContent = hasWeights
-    ? `${updatedAt ? formatTs(updatedAt) : "已生成"} · AI占比 ${Math.round(Number(config.ai_weight || 0) * 100)}%`
+    ? `${updatedAt ? formatTs(updatedAt) : "已生成"} · ${config.weather_location || "未设地区"} · AI占比 ${Math.round(Number(config.ai_weight || 0) * 100)}%`
     : "暂无 AI 结果";
   $("#aiOddsByDimension").innerHTML = hasWeights
     ? activeDimensions().map((dim) => {
@@ -305,6 +306,7 @@ function renderAiOdds() {
 
 function renderHistory() {
   const outfits = state.data.outfits;
+  const isAdmin = Boolean(state.data.user?.is_admin);
   $("#historyCount").textContent = `${outfits.length} 条`;
   $("#historyCount2").textContent = `${outfits.length} 条`;
   $("#historyList").innerHTML = outfits.length
@@ -318,6 +320,7 @@ function renderHistory() {
           ${item.observed_at ? `<small>记录时间 ${formatTs(item.observed_at)}</small>` : ""}
           ${item.notes ? `<small>${escapeHtml(item.notes)}</small>` : ""}
         </div>
+        ${isAdmin ? `<button class="secondary-action delete-outfit" data-date="${escapeHtml(item.date)}" type="button">删除并开放下注</button>` : ""}
       </div>
     `).join("")
     : `<div class="list-item"><div><strong>暂无历史记录</strong><small>管理员记录后会进入赔率模型。</small></div></div>`;
@@ -445,8 +448,8 @@ function updateOddsPreview() {
       $("#guessOdds").textContent = `${Number(result.odds_weight).toFixed(2)}x`;
       $("#guessProb").textContent = `预测概率 ${percentText(result.probability)}`;
       $("#poolInfo").textContent = Number(result.ai_blend_weight || 0) > 0
-        ? `人工 ${percentText(result.manual_prior_probability)}，AI ${percentText(result.ai_prior_probability)}，混合初始 ${percentText(result.prior_probability)}，样本 ${result.sample_weight}`
-        : `初始 ${percentText(result.prior_probability)}，样本 ${result.sample_weight}，组合置信 ${Math.round(result.combo_confidence * 100)}%`;
+        ? `人工权重 ${Math.round(result.manual_blend_weight * 100)}%，AI ${Math.round(result.ai_blend_weight * 100)}%，历史 ${Math.round(result.history_blend_weight * 100)}%，混合 ${percentText(result.prior_probability)}`
+        : `人工权重 ${Math.round(result.manual_blend_weight * 100)}%，历史 ${Math.round(result.history_blend_weight * 100)}%，概率 ${percentText(result.prior_probability)}，样本 ${result.sample_weight}`;
     } catch (err) {
       $("#guessOdds").textContent = "--";
       $("#guessProb").textContent = err.message;
@@ -522,9 +525,15 @@ function renderDimensionEditor() {
 function renderAiSettings() {
   const config = state.data.ai_config || {};
   $("#aiEnabled").checked = Boolean(config.enabled);
+  $("#manualWeightInput").value = Math.round(Number(config.manual_weight ?? 0.4) * 100);
   $("#aiWeightInput").value = Math.round(Number(config.ai_weight || 0) * 100);
+  $("#historyWeightInput").value = Math.round(Number(config.history_weight ?? 0.2) * 100);
   $("#aiModelInput").value = config.model || "";
   $("#aiEndpointInput").value = config.endpoint || "";
+  const knownLocations = Array.from($("#weatherLocationInput").options).map((option) => option.value);
+  const location = config.weather_location || "上海";
+  $("#weatherLocationInput").value = knownLocations.includes(location) ? location : "自定义";
+  $("#customWeatherLocationInput").value = knownLocations.includes(location) ? "" : location;
   $("#aiWeatherInput").value = config.weather || "";
   $("#aiKeyInput").placeholder = config.has_api_key ? "已保存，留空不修改" : "请输入 API Key";
 }
@@ -682,11 +691,15 @@ function bindEvents() {
     event.preventDefault();
     try {
       const apiKey = $("#aiKeyInput").value.trim();
+      const selectedLocation = $("#weatherLocationInput").value;
       const aiConfig = {
         enabled: $("#aiEnabled").checked,
+        manual_weight: Number($("#manualWeightInput").value || 0) / 100,
         ai_weight: Number($("#aiWeightInput").value || 0) / 100,
+        history_weight: Number($("#historyWeightInput").value || 0) / 100,
         model: $("#aiModelInput").value.trim(),
         endpoint: $("#aiEndpointInput").value.trim(),
+        weather_location: selectedLocation === "自定义" ? $("#customWeatherLocationInput").value.trim() : selectedLocation,
         weather: $("#aiWeatherInput").value.trim(),
       };
       if (apiKey) aiConfig.api_key = apiKey;
@@ -775,6 +788,21 @@ function bindEvents() {
       const row = event.target.closest(".dimension-row");
       state.editorDimensions.splice(Number(row.dataset.dimIndex), 1);
       renderDimensionEditor();
+    }
+    if (event.target.matches(".delete-outfit")) {
+      const date = event.target.dataset.date;
+      if (!window.confirm(`删除 ${date} 的实际着装记录，并恢复为可下注状态？当天结算记录也会删除。`)) return;
+      api("/api/outfits/delete", {
+        method: "POST",
+        body: JSON.stringify({ date }),
+      }).then(async () => {
+        toast("记录已删除，日期已开放下注");
+        if (state.selectedDate === date) {
+          await loadState();
+        } else {
+          await loadState();
+        }
+      }).catch((err) => toast(err.message));
     }
   });
 }

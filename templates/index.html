@@ -261,12 +261,38 @@
                 启用 AI 赔率
               </label>
               <label>
+                人工占比
+                <input id="manualWeightInput" type="number" min="0" max="100" step="1" />
+              </label>
+              <label>
                 AI 占比
                 <input id="aiWeightInput" type="number" min="0" max="100" step="1" />
               </label>
               <label>
+                历史占比
+                <input id="historyWeightInput" type="number" min="0" max="100" step="1" />
+              </label>
+              <label>
                 模型
                 <input id="aiModelInput" placeholder="gpt-4.1-mini" />
+              </label>
+              <label>
+                天气地区
+                <select id="weatherLocationInput">
+                  <option value="上海">上海</option>
+                  <option value="北京">北京</option>
+                  <option value="深圳">深圳</option>
+                  <option value="广州">广州</option>
+                  <option value="杭州">杭州</option>
+                  <option value="成都">成都</option>
+                  <option value="南京">南京</option>
+                  <option value="苏州">苏州</option>
+                  <option value="自定义">自定义</option>
+                </select>
+              </label>
+              <label>
+                自定义地区
+                <input id="customWeatherLocationInput" placeholder="如：上海浦东" />
               </label>
               <label class="wide">
                 接口地址
