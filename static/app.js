@@ -29,6 +29,7 @@ const COLOR_MAP = {
 };
 
 const UNKNOWN_VALUE = "未知";
+const MIN_GUESS_FIELDS = 2;
 
 function toast(message) {
   const node = $("#toast");
@@ -359,7 +360,7 @@ function renderSettlementPreview() {
       <strong>${escapeHtml(preview.message || "暂无结算数据。")}</strong>
     </div>
     <div>
-      <span>输家积分池</span>
+      <span>结算池</span>
       <strong>${Number(preview.pool || 0).toFixed(2)}</strong>
     </div>
     <div>
@@ -399,8 +400,8 @@ function renderSettlementPreview() {
 function labelResult(result) {
   return {
     hit: "猜中",
+    hit_all_right: "全员猜中再分配",
     miss: "猜错",
-    void_all_right: "全员猜中作废",
     void_all_wrong: "全员猜错作废",
   }[result] || result;
 }
@@ -430,9 +431,9 @@ function updateOddsPreview() {
   state.oddsTimer = setTimeout(async () => {
     const fields = collectGuessFields();
     updatePreview(fields);
-    if (Object.keys(fields).length === 0) {
+    if (Object.keys(fields).length < MIN_GUESS_FIELDS) {
       $("#guessOdds").textContent = "--";
-      $("#guessProb").textContent = "至少选一个维度";
+      $("#guessProb").textContent = `至少选 ${MIN_GUESS_FIELDS} 个维度`;
       $("#poolInfo").textContent = "";
       return;
     }
@@ -614,9 +615,14 @@ function bindEvents() {
   $("#guessForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
+      const fields = collectGuessFields();
+      if (Object.keys(fields).length < MIN_GUESS_FIELDS) {
+        toast(`至少选择 ${MIN_GUESS_FIELDS} 个竞猜维度`);
+        return;
+      }
       await api("/api/guesses", {
         method: "POST",
-        body: JSON.stringify({ date: state.selectedDate, fields: collectGuessFields() }),
+        body: JSON.stringify({ date: state.selectedDate, fields }),
       });
       toast("竞猜已保存");
       await loadState();

@@ -29,6 +29,7 @@ ADMIN_INVITE_CODE = os.environ.get("ADMIN_INVITE_CODE", "admin2026")
 MODEL_VERSION = "weighted-ai-prior-v5"
 ODDS_CAP = 50.0
 UNKNOWN_VALUE = "未知"
+MIN_GUESS_FIELDS = 2
 
 DEFAULT_OPTION_WEIGHTS = {
     "hair_style": {"短发": 0.26, "长发": 0.22, "马尾": 0.18, "卷发": 0.12, "丸子头": 0.08, "帽子压住看不清": 0.06, "今天头发很有想法": 0.08},
@@ -883,6 +884,12 @@ def guess_matches_actual(guess_fields, actual_fields):
     return all(actual_fields.get(key) == value for key, value in guess_fields.items())
 
 
+def validate_guess_fields(fields):
+    if len(fields) < MIN_GUESS_FIELDS:
+        raise ValueError("至少选择 %d 个竞猜维度。" % MIN_GUESS_FIELDS)
+    return fields
+
+
 def allocate_weighted_rewards(pool, winners):
     if not winners:
         return {}
@@ -953,15 +960,28 @@ def settlement_preview(conn, date_text, dimensions):
 
     existing = conn.execute(
         """
-        SELECT settlements.*, users.name FROM settlements
+        SELECT settlements.*, users.name,
+               guesses.color, guesses.style, guesses.fields_json, guesses.odds_weight
+        FROM settlements
         JOIN users ON users.id = settlements.user_id
+        LEFT JOIN guesses ON guesses.date = settlements.date AND guesses.user_id = settlements.user_id
         WHERE settlements.date = ?
         ORDER BY settlements.id ASC
         """,
         (date_text,),
     ).fetchall()
     if existing:
-        entries = [dict(row) for row in existing]
+        entries = []
+        for row in existing:
+            entry = dict(row)
+            fields = legacy_fields(row)
+            entry["fields"] = fields
+            entry["labels"] = format_fields(fields, dimensions)
+            entries.append(entry)
+        settled_pool = len(entries) if entries and entries[0]["result"] == "hit_all_right" else round(
+            sum(abs(float(entry["delta"])) for entry in entries if float(entry["delta"]) < 0),
+            2,
+        )
         return {
             "date": date_text,
             "status": "settled",
@@ -969,8 +989,11 @@ def settlement_preview(conn, date_text, dimensions):
             "can_settle": False,
             "settled": True,
             "stake": 1.0,
-            "pool": round(sum(abs(float(entry["delta"])) for entry in entries if float(entry["delta"]) < 0), 2),
-            "winner_weight": 0.0,
+            "pool": settled_pool,
+            "winner_weight": round(
+                sum(max(float(entry.get("odds_weight") or 0), 0.01) for entry in entries if entry["result"] in {"hit", "hit_all_right"}),
+                2,
+            ),
             "entries": entries,
             "transfers": settlement_transfers(entries),
         }
@@ -1009,8 +1032,28 @@ def settlement_preview(conn, date_text, dimensions):
             losers.append(item)
 
     entries = []
-    if not winners or not losers:
-        status = "void_all_right" if winners else "void_all_wrong"
+    if winners and not losers:
+        pool = float(len(winners))
+        rewards = allocate_weighted_rewards(pool, winners)
+        for winner in winners:
+            reward = rewards[winner["user_id"]]
+            delta = round(reward - 1.0, 2)
+            before = current_balance(conn, winner["user_id"])
+            entries.append(
+                {
+                    "date": date_text,
+                    "user_id": winner["user_id"],
+                    "name": winner["name"],
+                    "result": "hit_all_right",
+                    "delta": delta,
+                    "balance_before": before,
+                    "balance_after": before + delta,
+                    "odds_weight": winner["odds_weight"],
+                    "fields": winner["fields"],
+                    "labels": format_fields(winner["fields"], dimensions),
+                }
+            )
+    elif not winners:
         for guess in guesses:
             before = current_balance(conn, guess["user_id"])
             fields = legacy_fields(guess)
@@ -1019,7 +1062,7 @@ def settlement_preview(conn, date_text, dimensions):
                     "date": date_text,
                     "user_id": guess["user_id"],
                     "name": guess["name"],
-                    "result": status,
+                    "result": "void_all_wrong",
                     "delta": 0.0,
                     "balance_before": before,
                     "balance_after": before,
@@ -1065,11 +1108,17 @@ def settlement_preview(conn, date_text, dimensions):
                 }
             )
 
-    pool = round(sum(abs(float(entry["delta"])) for entry in entries if float(entry["delta"]) < 0), 2)
-    winner_weight = round(sum(max(float(entry.get("odds_weight") or 0), 0.01) for entry in entries if entry["result"] == "hit"), 2)
+    pool = len(entries) if entries and entries[0]["result"] == "hit_all_right" else round(
+        sum(abs(float(entry["delta"])) for entry in entries if float(entry["delta"]) < 0),
+        2,
+    )
+    winner_weight = round(
+        sum(max(float(entry.get("odds_weight") or 0), 0.01) for entry in entries if entry["result"] in {"hit", "hit_all_right"}),
+        2,
+    )
     return {
         "date": date_text,
-        "status": entries[0]["result"] if entries and entries[0]["result"].startswith("void") else "pending",
+        "status": entries[0]["result"] if entries and entries[0]["result"].startswith("void") else ("hit_all_right" if entries and entries[0]["result"] == "hit_all_right" else "pending"),
         "message": settlement_message(entries, pool),
         "can_settle": True,
         "settled": False,
@@ -1084,8 +1133,8 @@ def settlement_preview(conn, date_text, dimensions):
 def settlement_message(entries, pool):
     if not entries:
         return "暂无可结算数据。"
-    if entries[0]["result"] == "void_all_right":
-        return "全员猜中，当日作废，不产生积分变动。"
+    if entries[0]["result"] == "hit_all_right":
+        return "全员猜中，启用全员池 %.2f，按赔率权重重新分配。" % pool
     if entries[0]["result"] == "void_all_wrong":
         return "全员猜错，当日作废，不产生积分变动。"
     winners = sum(1 for entry in entries if entry["result"] == "hit")
@@ -1369,7 +1418,7 @@ class AppHandler(BaseHTTPRequestHandler):
         date_text = data.get("date") or today_iso()
         with db() as conn:
             dimensions = get_dimensions(conn)
-            fields = normalize_fields(data.get("fields") or legacy_request_fields(data), dimensions)
+            fields = validate_guess_fields(normalize_fields(data.get("fields") or legacy_request_fields(data), dimensions))
             if is_locked(conn, date_text) and not user["is_admin"]:
                 raise ValueError("今日竞猜已截止或已记录实际着装。")
             odds = odds_for_fields(conn, date_text, fields, dimensions)
