@@ -99,6 +99,15 @@ function formatTs(seconds) {
   });
 }
 
+function percentText(value) {
+  return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function oddsTextFromProbability(value) {
+  const probability = Math.max(0.001, Number(value || 0));
+  return `${Math.min(50, 1 / probability).toFixed(2)}x`;
+}
+
 function dateTimeInputValue(seconds) {
   const date = seconds ? new Date(seconds * 1000) : new Date();
   const offset = date.getTimezoneOffset() * 60000;
@@ -160,6 +169,7 @@ function render() {
   renderActualFields();
   renderGuessList();
   renderRecommendations();
+  renderAiOdds();
   renderHistory();
   renderLeaderboard();
   renderSettlements();
@@ -254,11 +264,42 @@ function renderRecommendations() {
   $("#topOdds").innerHTML = items.map((item) => `
     <div class="odds-card">
       <strong>${escapeHtml(item.labels.map((label) => label.value).join(" / "))}</strong>
-      <small>池子 ${item.pool_size}，概率 ${(item.probability * 100).toFixed(1)}%</small>
-      <small>初始 ${(item.prior_probability * 100).toFixed(1)}%</small>
+      <small>池子 ${item.pool_size}，概率 ${percentText(item.probability)}</small>
+      <small>初始 ${percentText(item.prior_probability)}${Number(item.ai_blend_weight || 0) > 0 ? `，AI ${percentText(item.ai_prior_probability)}` : ""}</small>
       <span>${Number(item.odds_weight).toFixed(2)}x</span>
     </div>
   `).join("");
+}
+
+function renderAiOdds() {
+  const weights = state.data.ai_option_weights || {};
+  const hasWeights = Object.values(weights).some((group) => group && Object.keys(group).length);
+  const updatedAt = state.data.ai_option_weights_updated_at;
+  const config = state.data.ai_config || {};
+  $("#aiPredictionMeta").textContent = hasWeights
+    ? `${updatedAt ? formatTs(updatedAt) : "已生成"} · AI占比 ${Math.round(Number(config.ai_weight || 0) * 100)}%`
+    : "暂无 AI 结果";
+  $("#aiOddsByDimension").innerHTML = hasWeights
+    ? activeDimensions().map((dim) => {
+      const dimWeights = weights[dim.key] || {};
+      const options = (dim.options || []).filter((option) => typeof dimWeights[option] === "number");
+      if (!options.length) return "";
+      return `
+        <div class="ai-dimension">
+          <strong>${escapeHtml(dim.name)}</strong>
+          <div class="ai-option-grid">
+            ${options.map((option) => `
+              <div class="ai-option">
+                <span>${escapeHtml(option)}</span>
+                <small>概率 ${percentText(dimWeights[option])}</small>
+                <b>${oddsTextFromProbability(dimWeights[option])}</b>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `;
+    }).join("") || `<p class="muted">AI 尚未返回可展示的选项概率。</p>`
+    : `<p class="muted">管理员启用 AI 并点击“调用 AI 更新赔率”后，所有成员都能在这里看到 AI 对每个选项的预测概率和对应赔率。</p>`;
 }
 
 function renderHistory() {
@@ -401,8 +442,10 @@ function updateOddsPreview() {
         body: JSON.stringify({ date: state.selectedDate, fields }),
       });
       $("#guessOdds").textContent = `${Number(result.odds_weight).toFixed(2)}x`;
-      $("#guessProb").textContent = `预测概率 ${(Number(result.probability) * 100).toFixed(1)}%`;
-      $("#poolInfo").textContent = `初始 ${(result.prior_probability * 100).toFixed(1)}%，样本 ${result.sample_weight}，组合置信 ${Math.round(result.combo_confidence * 100)}%`;
+      $("#guessProb").textContent = `预测概率 ${percentText(result.probability)}`;
+      $("#poolInfo").textContent = Number(result.ai_blend_weight || 0) > 0
+        ? `人工 ${percentText(result.manual_prior_probability)}，AI ${percentText(result.ai_prior_probability)}，混合初始 ${percentText(result.prior_probability)}，样本 ${result.sample_weight}`
+        : `初始 ${percentText(result.prior_probability)}，样本 ${result.sample_weight}，组合置信 ${Math.round(result.combo_confidence * 100)}%`;
     } catch (err) {
       $("#guessOdds").textContent = "--";
       $("#guessProb").textContent = err.message;

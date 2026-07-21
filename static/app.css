@@ -629,6 +629,49 @@ textarea {
   font-weight: 800;
 }
 
+.ai-odds-list,
+.ai-dimension {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-dimension {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.ai-option-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ai-option {
+  display: grid;
+  gap: 4px;
+  min-height: 82px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+}
+
+.ai-option span,
+.ai-option b {
+  overflow-wrap: anywhere;
+}
+
+.ai-option small {
+  color: var(--muted);
+}
+
+.ai-option b {
+  color: var(--brand-strong);
+  font-size: 18px;
+}
+
 .bars,
 .bar-group {
   display: grid;
@@ -717,6 +760,7 @@ textarea {
   .two-col,
   .actual-grid,
   .odds-grid,
+  .ai-option-grid,
   .settlement-summary {
     grid-template-columns: 1fr;
   }
