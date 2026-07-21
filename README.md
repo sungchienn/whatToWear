@@ -45,6 +45,42 @@ WHAT_TO_WEAR_DB=./data/what_to_wear.sqlite3
 
 ## 部署
 
+### Docker Compose
+
+复制环境变量模板并修改密钥：
+
+```bash
+cp .env.example .env
+```
+
+启动服务：
+
+```bash
+docker compose up -d --build
+```
+
+默认访问：
+
+```text
+http://127.0.0.1:8008
+```
+
+Compose 会把 SQLite 数据库持久化到 `what_to_wear_data` 数据卷，容器内路径为：
+
+```text
+/app/data/what_to_wear.sqlite3
+```
+
+如果要改宿主机端口，在 `.env` 中调整：
+
+```text
+HOST_PORT=8008
+```
+
+如果要导入旧数据库，可先停止服务，再把旧库复制进数据卷对应路径，文件名保持 `what_to_wear.sqlite3`。
+
+### systemd
+
 仓库内提供 systemd 服务模板：
 
 ```bash

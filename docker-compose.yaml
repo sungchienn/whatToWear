@@ -1,0 +1,31 @@
+services:
+  what-to-wear:
+    build:
+      context: .
+    image: what-to-wear:latest
+    container_name: what-to-wear
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8008
+      WHAT_TO_WEAR_DB: /app/data/what_to_wear.sqlite3
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env before starting}
+      USER_INVITE_CODE: ${USER_INVITE_CODE:-wear2026}
+      ADMIN_INVITE_CODE: ${ADMIN_INVITE_CODE:-admin2026}
+    ports:
+      - "${HOST_PORT:-8008}:8008"
+    volumes:
+      - what_to_wear_data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT', '8008'), timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  what_to_wear_data:

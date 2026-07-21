@@ -1,0 +1,9 @@
+.git
+.gitignore
+.env
+__pycache__/
+*.pyc
+data/
+*.sqlite3
+.DS_Store
+deploy/what-to-wear.service.local
