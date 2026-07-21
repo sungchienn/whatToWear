@@ -26,7 +26,7 @@ PORT = int(os.environ.get("PORT", "8008"))
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-change-this-secret")
 USER_INVITE_CODE = os.environ.get("USER_INVITE_CODE", "wear2026")
 ADMIN_INVITE_CODE = os.environ.get("ADMIN_INVITE_CODE", "admin2026")
-MODEL_VERSION = "weighted-ai-prior-v4"
+MODEL_VERSION = "weighted-ai-prior-v5"
 ODDS_CAP = 50.0
 UNKNOWN_VALUE = "未知"
 
@@ -398,6 +398,12 @@ def normalize_ai_option_weights(raw_weights, dimensions):
 
 
 def ai_training_payload(conn, date_text, dimensions):
+    target_date = parse_date(date_text)
+    previous_date = (target_date - dt.timedelta(days=1)).isoformat()
+    previous_row = conn.execute(
+        "SELECT * FROM outfit_records WHERE date = ?",
+        (previous_date,),
+    ).fetchone()
     rows = conn.execute(
         "SELECT * FROM outfit_records WHERE date < ? ORDER BY date DESC LIMIT 120",
         (date_text,),
@@ -415,11 +421,35 @@ def ai_training_payload(conn, date_text, dimensions):
         )
     return {
         "target_date": date_text,
+        "previous_date": previous_date,
+        "previous_day_outfit": outfit_for_ai(previous_row),
         "dimensions": [
-            {"key": dim["key"], "name": dim["name"], "options": dim["options"]}
+            {
+                "key": dim["key"],
+                "name": dim["name"],
+                "options": dim["options"],
+                "manual_option_weights": {
+                    option: option_probability(dim, option)
+                    for option in dim["options"]
+                },
+            }
             for dim in active_dimensions(dimensions)
         ],
         "history": history,
+    }
+
+
+def outfit_for_ai(row):
+    if not row:
+        return None
+    fields = legacy_fields(row)
+    return {
+        "date": row["date"],
+        "observed_at": row["observed_at"] if "observed_at" in row.keys() else row["created_at"],
+        "fields": fields,
+        "known_fields": known_fields(fields),
+        "tags": row["tags"] if "tags" in row.keys() else "",
+        "notes": row["notes"] if "notes" in row.keys() else "",
     }
 
 
@@ -433,18 +463,34 @@ def call_ai_for_option_weights(conn, date_text, dimensions):
     payload = ai_training_payload(conn, date_text, dimensions)
     user_content = {
         **payload,
-        "weather": config.get("weather", ""),
+        "weather_forecast": config.get("weather", ""),
         "output_schema": {
             "dimension_key": {"option_label": "probability number, 0-1 or percent"},
         },
+        "prediction_rules": [
+            "manual_option_weights 表示人工维护的衣柜/常见情况基础占比，是重要先验，不是历史命中占比。",
+            "不要因为前一天穿了某个高占比选项就机械降低它；如果人工占比很高，例如黑色衣服很多，目标日仍可能继续是黑色。",
+            "previous_day_outfit 是目标日前一天的人工记录着装，用于判断连续穿着、换洗、外套/鞋子延续等转移效应。",
+            "weather_forecast 是目标日期当地天气预报或人工补充信息，应影响外套、鞋子、袜类、保暖/运动/正式等维度。",
+            "history 用于估计个人习惯和周期性，但未知字段只说明当天没记录清楚，不要当成可预测选项。",
+        ],
     }
     body = {
         "model": config["model"],
-        "temperature": 0.2,
+        "temperature": 0.1,
         "messages": [
             {
                 "role": "system",
-                "content": "你是服装竞猜赔率助手。只返回 JSON 对象，不要 Markdown。为每个维度的每个已有选项估计目标日期穿着概率，未知选项不要输出。",
+                "content": (
+                    "你是服装竞猜赔率助手。任务是估计目标日期每个已有选项的边际概率。"
+                    "只返回 JSON 对象，不要 Markdown、解释或代码块。"
+                    "JSON 顶层 key 必须是维度 key，第二层 key 必须是该维度已有 option label；不要输出未知。"
+                    "每个维度内的概率应尽量覆盖全部已有选项并接近归一化，总和约等于 1。"
+                    "综合三类证据：1. manual_option_weights，代表衣柜/常见情况基础占比；"
+                    "2. previous_day_outfit，代表目标日前一天的实际记录和转移效应；"
+                    "3. weather_forecast 与 history，代表天气和长期习惯。"
+                    "高人工占比选项允许连续出现，不要简单套用“昨天穿过今天不穿”的规则。"
+                ),
             },
             {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
         ],
